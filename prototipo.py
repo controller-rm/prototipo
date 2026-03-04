@@ -140,14 +140,21 @@ def encode_qr_payload(payload: dict) -> str:
 
 
 def decode_qr_payload(text: str) -> dict:
-    if not text.startswith("QR1:"):
-        # fallback: se vier JSON puro
+    text = text.strip()
+
+    # caso venha JSON puro
+    if text.startswith("{"):
         return json.loads(text)
 
-    b64 = text[4:]
-    comp = base64.urlsafe_b64decode(b64.encode("ascii"))
-    raw = zlib.decompress(comp)
-    return json.loads(raw.decode("utf-8"))
+    # aceita QR1: ou ZIONNE_PEDIDO: (ou qualquer PREFIXO:)
+    if ":" in text:
+        prefix, b64 = text.split(":", 1)
+        if prefix in ("QR1", "ZIONNE_PEDIDO"):
+            comp = base64.urlsafe_b64decode(b64.encode("ascii"))
+            raw = zlib.decompress(comp)
+            return json.loads(raw.decode("utf-8"))
+
+    raise ValueError("Formato de QR não reconhecido")
 
 def beep():
     # WebAudio: tende a funcionar melhor que <audio autoplay> no celular
@@ -217,7 +224,22 @@ class QRVideoProcessor(VideoProcessorBase):
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
         up = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
+        # 3) binarização (ajuda MUITO em QR denso na tela)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        thr = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            51, 2
+        )
 
+        # às vezes decodifica melhor um pouco menor
+        thr_small = cv2.resize(thr, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_NEAREST)
+
+        data3, points3, _ = self.detector.detectAndDecode(thr_small)
+        if data3:
+            return data3, points3
+        ##########################################
         data2, points2, _ = self.detector.detectAndDecode(up)
         if data2:
             return data2, points2
