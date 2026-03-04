@@ -342,10 +342,35 @@ with tab_desktop:
             st.session_state.pop("import_ok", None)
             st.session_state.pop("import_pedido", None)
 
+        st.markdown("### Câmera")
+        camera_mode_label = st.selectbox(
+            "Escolha a câmera",
+            ["Traseira (recomendada)", "Frontal"],
+            index=0,
+        )
+
+        facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
+
+        # Quando mudar câmera, força reiniciar o WebRTC mudando a key
+        if "camera_facing_mode" not in st.session_state:
+            st.session_state["camera_facing_mode"] = facing_mode
+
+        if st.session_state["camera_facing_mode"] != facing_mode:
+            st.session_state["camera_facing_mode"] = facing_mode
+            # limpa leitura anterior para não ficar preso no pedido antigo
+            st.session_state.pop("qr_text_from_cam", None)
+            st.session_state.pop("qr_captured_at", None)
+            st.session_state.pop("import_ok", None)
+            st.session_state.pop("import_pedido", None)
+            st.rerun()
+
         ctx = webrtc_streamer(
-            key="qr-reader",
+            key=f"qr-reader-{st.session_state['camera_facing_mode']}",
             video_processor_factory=QRVideoProcessor,
-            media_stream_constraints={"video": True, "audio": False},
+            media_stream_constraints={
+                "video": {"facingMode": st.session_state["camera_facing_mode"]},
+                "audio": False,
+            },
         )
 
         if ctx.video_processor:
