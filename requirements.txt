@@ -1,0 +1,11 @@
+streamlit>=1.32
+pandas>=2.0
+
+qrcode[pil]>=7.4
+Pillow>=10.0
+
+opencv-python>=4.8
+av>=10.0
+
+streamlit-webrtc>=0.47
+streamlit-autorefresh>=1.0.1
