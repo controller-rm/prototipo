@@ -365,71 +365,66 @@ with tab_android:
 # -------------------------
 with tab_desktop:
     st.subheader("💻 Desktop — ler QR e reproduzir o pedido completo (sem ZIP)")
+
+    # --- estado base ---
     if "scanning" not in st.session_state:
         st.session_state["scanning"] = True
-        colA, colB = st.columns([1, 1], gap="large")
+    if "scan_nonce" not in st.session_state:
+        st.session_state["scan_nonce"] = 0
+    if "audio_enabled" not in st.session_state:
+        st.session_state["audio_enabled"] = False
+
+    # ✅ colunas SEMPRE criadas (corrige seu erro)
+    colA, colB = st.columns([1, 1], gap="large")
 
     with colA:
         st.markdown("### Leitor de QR Code")
-        st.caption("Quando ler, vai bipar, fechar a câmera e destacar o pedido.")
-
-        # --- estado para reiniciar scan ---
-        if "scan_nonce" not in st.session_state:
-            st.session_state["scan_nonce"] = 0
+        st.caption("Quando ler, toca bip, fecha a câmera e destaca o pedido.")
 
         # --- botões ---
-        cbtn1, cbtn2 = st.columns(2)
+        cbtn1, cbtn2, cbtn3 = st.columns(3)
+
         with cbtn1:
+            if st.button("🔊 Ativar som", use_container_width=True):
+                # Interação do usuário -> libera WebAudio no celular
+                st.session_state["audio_enabled"] = True
+                beep()  # teste imediato
+                st.success("Som ativado ✅")
+
+        with cbtn2:
             if st.button("🆕 Ler novo QR", use_container_width=True):
                 st.session_state["scanning"] = True
                 st.session_state["scan_nonce"] += 1
-                st.session_state.pop("qr_text_from_cam", None)
-                st.session_state.pop("qr_captured_at", None)
-                st.session_state.pop("import_ok", None)
-                st.session_state.pop("import_pedido", None)
-                st.session_state.pop("qr_beeped", None)
-                st.session_state.pop("qr_text_area", None)
+                for k in ["qr_text_from_cam","qr_captured_at","import_ok","import_pedido","qr_beeped","qr_text_area"]:
+                    st.session_state.pop(k, None)
                 st.rerun()
 
-        with cbtn2:
+        with cbtn3:
             if st.button("🧹 Limpar", use_container_width=True):
                 st.session_state["scanning"] = True
-                st.session_state.pop("qr_text_from_cam", None)
-                st.session_state.pop("qr_captured_at", None)
-                st.session_state.pop("import_ok", None)
-                st.session_state.pop("import_pedido", None)
-                st.session_state.pop("qr_beeped", None)
-                st.session_state.pop("qr_text_area", None)
+                for k in ["qr_text_from_cam","qr_captured_at","import_ok","import_pedido","qr_beeped","qr_text_area"]:
+                    st.session_state.pop(k, None)
                 st.rerun()
 
-        # Se já decodificou um pedido, esconda a câmera e mostre CTA grande
+        # ✅ se já tem pedido, "fecha" a câmera e mostra banner grande
         if st.session_state.get("import_ok") and st.session_state.get("import_pedido"):
             st.session_state["scanning"] = False
 
             st.markdown(
                 """
                 <div style="
-                    padding:14px;
-                    border-radius:12px;
-                    background:#0f172a;
-                    color:white;
-                    font-size:22px;
-                    font-weight:700;
-                    text-align:center;
-                    margin-top:10px;
-                ">
-                    ✅ Pedido decodificado
+                    padding:16px;border-radius:14px;background:#0f172a;color:white;
+                    font-size:26px;font-weight:800;text-align:center;margin-top:10px;">
+                    ✅ PEDIDO CODIFICADO
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-
             st.caption("Clique em **Ler novo QR** para escanear outro.")
-            # Campo texto ainda aparece (opcional)
             st.text_area(
                 "Conteúdo do QR (texto)",
                 value=st.session_state.get("qr_text_from_cam", ""),
-                height=100,
+                height=90,
                 key="qr_text_area",
             )
 
@@ -447,32 +442,24 @@ with tab_desktop:
             if "camera_facing_mode" not in st.session_state:
                 st.session_state["camera_facing_mode"] = facing_mode
 
-            # Se mudou câmera, reinicia o webrtc
             if st.session_state["camera_facing_mode"] != facing_mode:
                 st.session_state["camera_facing_mode"] = facing_mode
                 st.session_state["scan_nonce"] += 1
-                st.session_state.pop("qr_text_from_cam", None)
-                st.session_state.pop("qr_captured_at", None)
-                st.session_state.pop("qr_beeped", None)
-                st.session_state.pop("qr_text_area", None)
+                for k in ["qr_text_from_cam","qr_captured_at","qr_beeped","qr_text_area"]:
+                    st.session_state.pop(k, None)
                 st.rerun()
 
-            # --- CSS visor menor ---
+            # visor menor
             st.markdown(
                 """
                 <style>
-                /* tenta reduzir especificamente o vídeo do webrtc */
-                video {
-                    max-width: 320px !important;
-                    max-height: 200px !important;
-                    border-radius: 10px;
-                }
+                video { max-width: 320px !important; max-height: 200px !important; border-radius: 10px; }
                 </style>
                 """,
                 unsafe_allow_html=True,
             )
 
-            # --- mostra câmera somente se scanning=True ---
+            # --- câmera só quando scanning=True ---
             if st.session_state.get("scanning", True):
                 ctx = webrtc_streamer(
                     key=f"qr-reader-{st.session_state['camera_facing_mode']}-{st.session_state['scan_nonce']}",
@@ -486,11 +473,9 @@ with tab_desktop:
                 if ctx.video_processor:
                     st.info(ctx.video_processor.last_status)
 
-                # refresh enquanto não capturou
                 if ctx.video_processor and not st.session_state.get("qr_text_from_cam"):
                     st_autorefresh(interval=600, key=f"qr_refresh_{st.session_state['scan_nonce']}")
 
-                # capturar 1x quando ler
                 if ctx.video_processor and ctx.video_processor.last_text and not st.session_state.get("qr_text_from_cam"):
                     st.session_state["qr_text_from_cam"] = ctx.video_processor.last_text
                     st.session_state["qr_captured_at"] = datetime.now().strftime("%H:%M:%S")
@@ -506,7 +491,7 @@ with tab_desktop:
             if st.session_state.get("qr_captured_at"):
                 st.caption(f"Capturado às {st.session_state['qr_captured_at']}")
 
-            # decodificar
+            # decodifica
             meta = None
             meta_err = None
             if qr_text.strip():
@@ -516,15 +501,14 @@ with tab_desktop:
                     meta_err = str(e)
 
             if meta and isinstance(meta, dict) and meta.get("type") == "ORDER_INLINE":
-                # beep 1x
-                if not st.session_state.get("qr_beeped"):
+                # ✅ beep 1x (apenas se som foi ativado)
+                if st.session_state.get("audio_enabled") and not st.session_state.get("qr_beeped"):
                     beep()
                     st.session_state["qr_beeped"] = True
 
                 st.session_state["import_ok"] = True
                 st.session_state["import_pedido"] = meta
-                # fecha câmera
-                st.session_state["scanning"] = False
+                st.session_state["scanning"] = False  # fecha câmera
                 st.rerun()
             elif qr_text.strip():
                 st.error(f"QR lido, mas não consegui decodificar o pedido: {meta_err}")
@@ -548,8 +532,5 @@ with tab_desktop:
                 "Total",
                 f'R$ {float(pedido["total"]):,.2f}'.replace(",", "X").replace(".", ",").replace("X", "."),
             )
-
-            with st.expander("Pedido (JSON)"):
-                st.json(pedido)
         else:
             st.info("Aguardando leitura do QR para reproduzir o pedido.")
