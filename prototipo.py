@@ -149,6 +149,21 @@ def decode_qr_payload(text: str) -> dict:
     raw = zlib.decompress(comp)
     return json.loads(raw.decode("utf-8"))
 
+def beep():
+    # WAV bem curto (bipe). Base64 embutido pra não depender de arquivo externo.
+    wav_b64 = (
+        "UklGRjQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YRAAAAABAQEB"
+        "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=="
+    )
+    st.markdown(
+        f"""
+        <audio autoplay>
+            <source src="data:audio/wav;base64,{wav_b64}" type="audio/wav">
+        </audio>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def read_zip_bytes(zip_bytes: bytes) -> dict[str, bytes]:
     out: dict[str, bytes] = {}
     with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
@@ -334,38 +349,79 @@ with tab_desktop:
 
     with colA:
         st.markdown("### Ler QR Code pela webcam")
-        st.caption("Ao ler o QR, o pedido completo será decodificado e exibido ao lado.")
+        st.caption("Ao ler o QR, um bipe toca e o pedido aparece ao lado. Use 'Ler novo QR' para escanear outro.")
 
-        if st.button("🧹 Limpar QR", use_container_width=True):
-            st.session_state.pop("qr_text_from_cam", None)
-            st.session_state.pop("qr_captured_at", None)
-            st.session_state.pop("import_ok", None)
-            st.session_state.pop("import_pedido", None)
+        # --- estado para reiniciar scan ---
+        if "scan_nonce" not in st.session_state:
+            st.session_state["scan_nonce"] = 0
+
+        # --- botões de ação ---
+        cbtn1, cbtn2 = st.columns(2)
+        with cbtn1:
+            if st.button("🆕 Ler novo QR", use_container_width=True):
+                st.session_state["scan_nonce"] += 1
+                st.session_state.pop("qr_text_from_cam", None)
+                st.session_state.pop("qr_captured_at", None)
+                st.session_state.pop("import_ok", None)
+                st.session_state.pop("import_pedido", None)
+                st.session_state.pop("qr_beeped", None)
+                # limpa o componente do text_area
+                st.session_state.pop("qr_text_area", None)
+                st.rerun()
+
+        with cbtn2:
+            if st.button("🧹 Limpar QR", use_container_width=True):
+                st.session_state.pop("qr_text_from_cam", None)
+                st.session_state.pop("qr_captured_at", None)
+                st.session_state.pop("import_ok", None)
+                st.session_state.pop("import_pedido", None)
+                st.session_state.pop("qr_beeped", None)
+                st.session_state.pop("qr_text_area", None)
+                st.rerun()
 
         st.markdown("### Câmera")
         camera_mode_label = st.selectbox(
             "Escolha a câmera",
             ["Traseira (recomendada)", "Frontal"],
             index=0,
+            key="camera_select",
         )
-
         facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
 
-        # Quando mudar câmera, força reiniciar o WebRTC mudando a key
         if "camera_facing_mode" not in st.session_state:
             st.session_state["camera_facing_mode"] = facing_mode
 
+        # Se mudou câmera, reinicia o webrtc
         if st.session_state["camera_facing_mode"] != facing_mode:
             st.session_state["camera_facing_mode"] = facing_mode
-            # limpa leitura anterior para não ficar preso no pedido antigo
+            st.session_state["scan_nonce"] += 1
             st.session_state.pop("qr_text_from_cam", None)
             st.session_state.pop("qr_captured_at", None)
             st.session_state.pop("import_ok", None)
             st.session_state.pop("import_pedido", None)
+            st.session_state.pop("qr_beeped", None)
+            st.session_state.pop("qr_text_area", None)
             st.rerun()
 
+        # --- CSS para reduzir visor da câmera ---
+        st.markdown(
+            """
+            <style>
+            /* reduz largura e altura do vídeo do webrtc */
+            div[data-testid="stVideo"] video,
+            video {
+                max-width: 360px !important;
+                max-height: 240px !important;
+                border-radius: 10px;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # --- webrtc com key variável (reinicia quando scan_nonce muda) ---
         ctx = webrtc_streamer(
-            key=f"qr-reader-{st.session_state['camera_facing_mode']}",
+            key=f"qr-reader-{st.session_state['camera_facing_mode']}-{st.session_state['scan_nonce']}",
             video_processor_factory=QRVideoProcessor,
             media_stream_constraints={
                 "video": {"facingMode": st.session_state["camera_facing_mode"]},
@@ -376,9 +432,11 @@ with tab_desktop:
         if ctx.video_processor:
             st.info(ctx.video_processor.last_status)
 
+        # refresh enquanto não capturou ainda
         if ctx.video_processor and not st.session_state.get("qr_text_from_cam"):
-            st_autorefresh(interval=600, key="qr_refresh")  # 0,6s
+            st_autorefresh(interval=600, key=f"qr_refresh_{st.session_state['scan_nonce']}")
 
+        # capturar 1x quando ler
         if ctx.video_processor and ctx.video_processor.last_text and not st.session_state.get("qr_text_from_cam"):
             st.session_state["qr_text_from_cam"] = ctx.video_processor.last_text
             st.session_state["qr_captured_at"] = datetime.now().strftime("%H:%M:%S")
@@ -387,7 +445,8 @@ with tab_desktop:
         qr_text = st.text_area(
             "Conteúdo do QR (texto)",
             value=st.session_state.get("qr_text_from_cam", ""),
-            height=140,
+            height=110,
+            key="qr_text_area",  # ✅ crucial para conseguir limpar
         )
 
         if st.session_state.get("qr_captured_at"):
@@ -402,12 +461,16 @@ with tab_desktop:
                 meta_err = str(e)
 
         if meta and isinstance(meta, dict) and meta.get("type") == "ORDER_INLINE":
+            # ✅ beep só 1 vez por leitura
+            if not st.session_state.get("qr_beeped"):
+                beep()
+                st.session_state["qr_beeped"] = True
+
             st.success("Pedido decodificado ✅")
             st.session_state["import_ok"] = True
             st.session_state["import_pedido"] = meta
         elif qr_text.strip():
             st.error(f"QR lido, mas não consegui decodificar o pedido: {meta_err}")
-
     with colB:
         st.markdown("### Pedido reproduzido")
         if st.session_state.get("import_ok") and st.session_state.get("import_pedido"):
