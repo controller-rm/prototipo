@@ -426,26 +426,26 @@ with tab_android:
             with st.expander("Ver conteúdo do QR (compactado)"):
                 st.code(st.session_state["last_qr_text"])
 
-
 # =========================================================
-# DESKTOP (CAMERA SEMPRE ABERTA + NOVO QR LIMPA E REARMA)
+# DESKTOP (CÂMERA SEMPRE ABERTA + AUTO-CAPTURA + NOVO QR LIMPA E REARMA)
 # =========================================================
 with tab_desktop:
     st.subheader("💻 Desktop — ler QR e reproduzir pedido (descrição via tab_produto)")
 
     # -------------------------
-    # Estados
+    # Estados (profissional / produtivo)
     # -------------------------
-    st.session_state.setdefault("scan_token", 0)
+    st.session_state.setdefault("scan_token", 0)              # ciclo atual de leitura
     st.session_state.setdefault("import_ok", False)
     st.session_state.setdefault("import_pedido", None)
-    st.session_state.setdefault("last_scan_token_done", -1)
-    st.session_state.setdefault("pending_clear", False)  # ✅ novo
+    st.session_state.setdefault("imported_token", -1)         # token em que importou com sucesso
+    st.session_state.setdefault("cleared_token", -1)          # token em que limpamos o processor
+    st.session_state.setdefault("camera_facing_mode", "environment")
 
     produtos = st.session_state["tab_produto"].copy()
 
     # -------------------------
-    # Processor com "scan_token"
+    # Processor (mantém câmera viva; rearma via scan_token)
     # -------------------------
     import zxingcpp
     import cv2
@@ -462,13 +462,13 @@ with tab_desktop:
             self._seen_token = 0
             self._frame_i = 0
 
-        def _reset_for_new_scan(self):
+        def reset_for_new_scan(self):
             self.last_text = None
             self.last_status = "Aguardando QR..."
             self.last_decode_time = 0.0
 
         def _try_decode(self, img_bgr):
-            # performance: tenta decodificar a cada 2 frames
+            # performance: tenta decodificar 1 a cada 2 frames
             self._frame_i += 1
             if self._frame_i % 2 != 0:
                 return ""
@@ -495,45 +495,49 @@ with tab_desktop:
             img = frame.to_ndarray(format="bgr24")
             now_ts = datetime.now().timestamp()
 
-            # se token mudou, rearma leitura (sem reconectar)
+            # se token mudou, rearma leitura (sem reconectar a câmera)
             if self.scan_token != self._seen_token:
                 self._seen_token = self.scan_token
-                self._reset_for_new_scan()
+                self.reset_for_new_scan()
 
             data = self._try_decode(img)
 
             if data and (now_ts - self.last_decode_time > self.debounce_seconds):
                 self.last_text = data
-                self.last_status = "✅ QR lido"
+                self.last_status = "✅ QR detectado"
                 self.last_decode_time = now_ts
             else:
-                self.last_status = "✅ QR lido" if self.last_text else "Aguardando QR..."
+                self.last_status = "✅ QR detectado" if self.last_text else "Aguardando QR..."
 
             return frame
 
     # -------------------------
-    # UI
+    # Função: limpar pedido + rearme
+    # -------------------------
+    def arm_new_scan():
+        st.session_state["scan_token"] += 1
+        st.session_state["import_ok"] = False
+        st.session_state["import_pedido"] = None
+        st.session_state["imported_token"] = -1
+        # cleared_token será aplicado no processor (assim que ctx existir)
+        st.rerun()
+
+    # -------------------------
+    # Layout
     # -------------------------
     colA, colB = st.columns([1, 1], gap="large")
 
     with colA:
         st.markdown("### Leitor de QR Code")
 
-        b1, b2 = st.columns(2)
-        
-        with b1:
+        c1, c2 = st.columns([0.45, 0.55])
+        with c1:
             if st.button("🆕 Novo QR", use_container_width=True, type="primary"):
-                st.session_state["scan_token"] += 1
-                st.session_state["import_ok"] = False
-                st.session_state["import_pedido"] = None
-                st.session_state["last_scan_token_done"] = -1
-                st.session_state["pending_clear"] = True  # ✅ força limpar o last_text do processor
-                st.rerun()
-        
-        with b2:
-            st.caption("Câmera fica sempre aberta ✅")
+                arm_new_scan()
+        with c2:
+            st.caption("Câmera sempre aberta • Captura automática • 1 clique para rearmar")
 
-        # CSS do vídeo
+        # CSS do vídeo (padronizado)
         st.markdown("""
         <style>
         video {
@@ -554,18 +558,19 @@ with tab_desktop:
             key="camera_select",
         )
         facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
+        st.session_state["camera_facing_mode"] = facing_mode
 
         RTC_CONFIGURATION = RTCConfiguration(
             {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
         )
 
         ctx = webrtc_streamer(
-            key="qr-reader",  # ✅ fixo: não reconecta
+            key="qr-reader",  # FIXO: não reconecta
             video_processor_factory=QRVideoProcessor,
             rtc_configuration=RTC_CONFIGURATION,
             media_stream_constraints={
                 "video": {
-                    "facingMode": facing_mode,
+                    "facingMode": st.session_state["camera_facing_mode"],
                     "width": {"ideal": 1280},
                     "height": {"ideal": 720},
                     "frameRate": {"ideal": 24, "max": 30},
@@ -580,31 +585,41 @@ with tab_desktop:
             async_processing=True,
         )
 
-        if (
-            ctx.video_processor
-            and ctx.video_processor.last_text
-            and (st.session_state["last_scan_token_done"] != st.session_state["scan_token"])
-            and (not st.session_state["import_ok"])
-        ):
-            qr_text = ctx.video_processor.last_text
-        
-            try:
-                meta = decode_qr_payload(qr_text)
-            except Exception as e:
-                st.error(f"Não consegui decodificar o QR: {e}")
-                meta = None
-        
-            if meta and isinstance(meta, dict) and meta.get("type") == "ORDER_MIN":
-                st.session_state["import_ok"] = True
-                st.session_state["import_pedido"] = meta
-                st.session_state["last_scan_token_done"] = st.session_state["scan_token"]
-                st.rerun()
-            else:
-                st.session_state["last_scan_token_done"] = st.session_state["scan_token"]
+        # ✅ Sempre “pinga” a tela enquanto não importou
+        # Isso é o que faz a captura acontecer SEM clicar em nada.
+        if not st.session_state["import_ok"]:
+            st_autorefresh(interval=250, key=f"poll_scan_{st.session_state['scan_token']}")
 
-        # (opcional) debug do texto lido
-        with st.expander("Debug: texto do QR lido"):
-            st.code(ctx.video_processor.last_text if ctx.video_processor else "")
+        if ctx.video_processor:
+            # passa o token do ciclo atual para o processor
+            ctx.video_processor.scan_token = st.session_state["scan_token"]
+            st.info(ctx.video_processor.last_status)
+
+            # ✅ LIMPEZA REAL (no processor) — 1 clique resolve
+            # Se mudamos o scan_token, garantimos que o last_text do processor zere agora.
+            if st.session_state["cleared_token"] != st.session_state["scan_token"]:
+                ctx.video_processor.reset_for_new_scan()
+                st.session_state["cleared_token"] = st.session_state["scan_token"]
+                # não precisa rerun aqui; o autorefresh já mantém vivo
+
+            # ✅ IMPORTAÇÃO AUTOMÁTICA AO DETECTAR QR (sem botão)
+            if (
+                ctx.video_processor.last_text
+                and (st.session_state["imported_token"] != st.session_state["scan_token"])
+            ):
+                qr_text = ctx.video_processor.last_text
+
+                try:
+                    meta = decode_qr_payload(qr_text)
+                except Exception as e:
+                    st.error(f"Não consegui decodificar o QR: {e}")
+                    meta = None
+
+                if meta and isinstance(meta, dict) and meta.get("type") == "ORDER_MIN":
+                    st.session_state["import_ok"] = True
+                    st.session_state["import_pedido"] = meta
+                    st.session_state["imported_token"] = st.session_state["scan_token"]
+                    st.rerun()  # atualiza painel da direita imediatamente
 
     with colB:
         st.markdown("### Pedido reproduzido")
@@ -640,5 +655,3 @@ with tab_desktop:
             st.metric("Total", brl(float(itens["subtotal"].sum())))
         else:
             st.info("Aguardando leitura do QR para reproduzir o pedido.")
-
-
