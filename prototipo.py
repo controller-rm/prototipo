@@ -166,8 +166,6 @@ def decode_qr_payload(text: str) -> dict:
 # - Processor QR (ZXing) para usar no Desktop depois
 # =========================================================
 
-from __future__ import annotations
-
 import io
 import json
 import uuid
@@ -759,3 +757,4 @@ with tab_desktop:
             st.metric("Total", brl(float(itens["subtotal"].sum())))
         else:
             st.info("Aguardando leitura do QR para reproduzir o pedido.")
+
