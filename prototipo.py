@@ -159,32 +159,37 @@ def decode_qr_payload(text: str) -> dict:
     raise ValueError("Formato de QR não reconhecido")
 
 
+import uuid
+import streamlit as st
+
 def beep():
-    # WebAudio: funciona melhor após clique/ação do usuário (política de autoplay do navegador)
+    nonce = uuid.uuid4().hex  # força re-render do iframe
     st.components.v1.html(
-        """
+        f"""
+        <div id="{nonce}"></div>
         <script>
-        (async () => {
-          try {
+        (async () => {{
+          try {{
             const AudioContext = window.AudioContext || window.webkitAudioContext;
             const ctx = new AudioContext();
-            if (ctx.state === "suspended") { await ctx.resume(); }
+            if (ctx.state === "suspended") {{ await ctx.resume(); }}
 
             const o = ctx.createOscillator();
             const g = ctx.createGain();
             o.type = "sine";
             o.frequency.value = 880;
-            g.gain.value = 0.08;
+            g.gain.value = 0.10;   // um pouco mais alto
             o.connect(g); g.connect(ctx.destination);
             o.start();
-            setTimeout(() => { o.stop(); ctx.close(); }, 120);
-          } catch (e) {}
-        })();
+            setTimeout(() => {{ o.stop(); ctx.close(); }}, 140);
+          }} catch (e) {{
+            console.log(e);
+          }}
+        }})();
         </script>
         """,
         height=0,
     )
-
 
 # =========================================================
 # QR PAYLOAD (AGORA: cliente completo + itens mínimos)
@@ -512,11 +517,14 @@ with tab_desktop:
 
             st.markdown("""
             <style>
+            /* Pega o video do webrtc e dá um frame fixo */
             video {
             width: 100% !important;
             max-width: 720px !important;
-            height: auto !important;
-            border-radius: 10px;
+            height: 420px !important;     /* altura fixa para enquadramento */
+            object-fit: cover !important; /* preenche sem distorcer */
+            border-radius: 12px;
+            background: #000;
             }
             </style>
             """, unsafe_allow_html=True)
@@ -526,15 +534,16 @@ with tab_desktop:
                     key=f"qr-reader-{st.session_state['camera_facing_mode']}-{st.session_state['scan_nonce']}",
                     video_processor_factory=QRVideoProcessor,
                     media_stream_constraints={
-                        "video": {
+                    "video": {
                         "facingMode": st.session_state["camera_facing_mode"],
-                        "width":  {"ideal": 1280},
+                        "width": {"ideal": 1280},
                         "height": {"ideal": 720},
+                        "aspectRatio": {"ideal": 16/9},
                         "frameRate": {"ideal": 30, "max": 30},
-                        },
-                        "audio": False,
                     },
-                )
+                    "audio": False,
+                    },
+                                    )
 
                 if ctx.video_processor:
                     st.info(ctx.video_processor.last_status)
