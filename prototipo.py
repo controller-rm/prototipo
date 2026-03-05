@@ -126,9 +126,9 @@ def brl(v: float) -> str:
 def make_qr_png(payload_text: str) -> bytes:
     qr = qrcode.QRCode(
         version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,  # <- era M
-        box_size=12,                                        # <- era 8
-        border=4,                                           # <- era 3
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=16,
+        border=6,
     )
     qr.add_data(payload_text)
     qr.make(fit=True)
