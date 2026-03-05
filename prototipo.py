@@ -455,160 +455,206 @@ with tab_android:
 
 
 # =========================================================
-# DESKTOP
+# DESKTOP (CAMERA SEMPRE ABERTA + NOVO QR LIMPA E REARMA)
 # =========================================================
 with tab_desktop:
     st.subheader("💻 Desktop — ler QR e reproduzir pedido (descrição via tab_produto)")
-    # ✅ estados base (adicione este também)
-    if "webrtc_key_nonce" not in st.session_state:
-        st.session_state["webrtc_key_nonce"] = 0
-    if "webrtc_playing" not in st.session_state:
-        st.session_state["webrtc_playing"] = True
-    # estados base
-    if "scanning" not in st.session_state:
-        st.session_state["scanning"] = True
-    if "scan_nonce" not in st.session_state:
-        st.session_state["scan_nonce"] = 0
+
+    # -------------------------
+    # Estados
+    # -------------------------
     if "audio_enabled" not in st.session_state:
         st.session_state["audio_enabled"] = False
 
+    # token que "rearma" a leitura sem resetar WebRTC
+    if "scan_token" not in st.session_state:
+        st.session_state["scan_token"] = 0
+
+    # texto capturado do QR
+    if "qr_text_from_cam" not in st.session_state:
+        st.session_state["qr_text_from_cam"] = ""
+
+    # pedido importado
+    if "import_ok" not in st.session_state:
+        st.session_state["import_ok"] = False
+    if "import_pedido" not in st.session_state:
+        st.session_state["import_pedido"] = None
+    if "qr_beeped" not in st.session_state:
+        st.session_state["qr_beeped"] = False
+
     produtos = st.session_state["tab_produto"].copy()
 
+    # -------------------------
+    # Processor com "scan_token"
+    # -------------------------
+    import zxingcpp
+    import cv2
+    from streamlit_webrtc import RTCConfiguration, VideoProcessorBase
+
+    class QRVideoProcessor(VideoProcessorBase):
+        def __init__(self):
+            self.last_text: Optional[str] = None
+            self.last_status: str = "Aguardando QR..."
+            self.last_decode_time = 0.0
+            self.debounce_seconds = 1.2
+
+            # token vindo do app (rearma leitura)
+            self.scan_token = 0
+            self._seen_token = 0
+            self._frame_i = 0
+
+        def _reset_for_new_scan(self):
+            self.last_text = None
+            self.last_status = "Aguardando QR..."
+            self.last_decode_time = 0.0
+
+        def _try_decode(self, img_bgr):
+            # 🔥 performance: tenta decodificar só a cada 2 frames
+            self._frame_i += 1
+            if self._frame_i % 2 != 0:
+                return ""
+
+            h, w = img_bgr.shape[:2]
+            pad = 0.12
+            x0 = int(w * pad); x1 = int(w * (1 - pad))
+            y0 = int(h * pad); y1 = int(h * (1 - pad))
+            img_bgr = img_bgr[y0:y1, x0:x1]
+
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            gray = cv2.resize(gray, None, fx=1.6, fy=1.6, interpolation=cv2.INTER_CUBIC)
+
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            gray = clahe.apply(gray)
+
+            blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
+            gray = cv2.addWeighted(gray, 1.6, blur, -0.6, 0)
+
+            results = zxingcpp.read_barcodes(gray)
+            return results[0].text if results else ""
+
+        def recv(self, frame):
+            img = frame.to_ndarray(format="bgr24")
+            now_ts = datetime.now().timestamp()
+
+            # ✅ se token mudou, "rearma" sem reconectar a câmera
+            if self.scan_token != self._seen_token:
+                self._seen_token = self.scan_token
+                self._reset_for_new_scan()
+
+            data = self._try_decode(img)
+
+            if data and (now_ts - self.last_decode_time > self.debounce_seconds):
+                self.last_text = data
+                self.last_status = "✅ QR lido"
+                self.last_decode_time = now_ts
+            else:
+                # não ficar “piscando” status
+                if self.last_text:
+                    self.last_status = "✅ QR lido"
+                else:
+                    self.last_status = "Aguardando QR..."
+
+            return frame
+
+    # -------------------------
+    # UI
+    # -------------------------
     colA, colB = st.columns([1, 1], gap="large")
 
     with colA:
         st.markdown("### Leitor de QR Code")
 
-        b1, b2, b3, b4 = st.columns(4)
-
+        b1, b2, b3 = st.columns(3)
         with b1:
             if st.button("🔊 Ativar som", use_container_width=True):
                 st.session_state["audio_enabled"] = True
-                beep()  # só pra testar
+                beep()  # teste
                 st.success("Som ativado ✅")
 
         with b2:
-            if st.button("🆕 Ler novo QR", use_container_width=True):
-                st.session_state["scanning"] = True
-                st.session_state["webrtc_playing"] = True
-                for k in ["qr_text_from_cam", "import_ok", "import_pedido", "qr_beeped", "qr_text_area"]:
-                    st.session_state.pop(k, None)
+            if st.button("🆕 Novo QR", use_container_width=True, type="primary"):
+                # ✅ NÃO reseta WebRTC. Só limpa e rearma.
+                st.session_state["scan_token"] += 1
+                st.session_state["qr_text_from_cam"] = ""
+                st.session_state["import_ok"] = False
+                st.session_state["import_pedido"] = None
+                st.session_state["qr_beeped"] = False
+                # (opcional) limpar text_area
+                st.session_state.pop("qr_text_area", None)
                 st.rerun()
 
         with b3:
-            if st.button("🧹 Limpar", use_container_width=True):
-                st.session_state["scanning"] = True
-                for k in ["qr_text_from_cam", "import_ok", "import_pedido", "qr_beeped", "qr_text_area"]:
-                    st.session_state.pop(k, None)
+            if st.button("🧹 Limpar pedido", use_container_width=True):
+                st.session_state["qr_text_from_cam"] = ""
+                st.session_state["import_ok"] = False
+                st.session_state["import_pedido"] = None
+                st.session_state["qr_beeped"] = False
+                st.session_state.pop("qr_text_area", None)
                 st.rerun()
 
-        with b4:
-            if st.button("🔄 Resetar câmera", use_container_width=True):
-                # ✅ aqui força renegociação limpa do WebRTC
-                st.session_state["webrtc_key_nonce"] += 1
-                st.session_state["webrtc_playing"] = True
-                st.session_state["scanning"] = True
-                for k in ["qr_text_from_cam", "qr_beeped", "qr_text_area"]:
-                    st.session_state.pop(k, None)
-                st.rerun()
-
-        # se já tem pedido, fecha câmera e destaca
-        if st.session_state.get("import_ok") and st.session_state.get("import_pedido"):
-            st.session_state["webrtc_playing"] = False
-            st.session_state["scanning"] = False
-            st.markdown(
-                """
-                <div style="padding:16px;border-radius:14px;background:#0f172a;color:white;
-                            font-size:26px;font-weight:800;text-align:center;margin-top:10px;">
-                    ✅ PEDIDO CODIFICADO
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.caption("Clique em **Ler novo QR** para escanear outro.")
-
-        else:
-            st.markdown("### Câmera")
-
-            camera_mode_label = st.selectbox(
-                "Escolha a câmera",
-                ["Traseira (recomendada)", "Frontal"],
-                index=0,
-                key="camera_select",
-            )
-            facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
-            if "camera_facing_mode" not in st.session_state:
-                st.session_state["camera_facing_mode"] = facing_mode
-
-            if st.session_state.get("camera_facing_mode") != facing_mode:
-                st.session_state["camera_facing_mode"] = facing_mode
-                st.session_state["webrtc_key_nonce"] += 1  # ✅ força reset
-                st.session_state["webrtc_playing"] = True
-                st.session_state["scanning"] = True
-                for k in ["qr_text_from_cam", "qr_beeped", "qr_text_area"]:
-                    st.session_state.pop(k, None)
-                st.rerun()
-
-            st.markdown("""
-            <style>
-            /* Pega o video do webrtc e dá um frame fixo */
-            video {
+        # CSS do vídeo
+        st.markdown("""
+        <style>
+        video {
             width: 100% !important;
             max-width: 720px !important;
-            height: 420px !important;     /* altura fixa para enquadramento */
-            object-fit: cover !important; /* preenche sem distorcer */
+            height: 420px !important;
+            object-fit: cover !important;
             border-radius: 12px;
             background: #000;
-            }
-            </style>
-            """, unsafe_allow_html=True)
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
-            if st.session_state.get("scanning", True):
-                from streamlit_webrtc import RTCConfiguration
+        # câmera (sempre ligada)
+        camera_mode_label = st.selectbox(
+            "Escolha a câmera",
+            ["Traseira (recomendada)", "Frontal"],
+            index=0,
+            key="camera_select",
+        )
+        facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
 
-                RTC_CONFIGURATION = RTCConfiguration(
-                    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-                )
+        RTC_CONFIGURATION = RTCConfiguration(
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        )
 
-                webrtc_key = f"qr-reader-{st.session_state['webrtc_key_nonce']}"
+        ctx = webrtc_streamer(
+            key="qr-reader",  # ✅ FIXO PARA NÃO RECONEXÃO A CADA CLIQUE
+            video_processor_factory=QRVideoProcessor,
+            rtc_configuration=RTC_CONFIGURATION,
+            media_stream_constraints={
+                "video": {
+                    "facingMode": facing_mode,  # ✅ simples e compatível
+                    "width": {"ideal": 1280},
+                    "height": {"ideal": 720},
+                    "frameRate": {"ideal": 24, "max": 30},
+                    "advanced": [
+                        {"focusMode": "continuous"},
+                        {"exposureMode": "continuous"},
+                        {"whiteBalanceMode": "continuous"},
+                    ],
+                },
+                "audio": False,
+            },
+            async_processing=True,
+        )
 
-                ctx = webrtc_streamer(
-                    key=webrtc_key,
-                    video_processor_factory=QRVideoProcessor,
-                    media_stream_constraints={
-                        "video": {
-                            "facingMode": st.session_state["camera_facing_mode"],  # ✅ string simples é mais compatível
-                            "width": {"ideal": 1280},
-                            "height": {"ideal": 720},
-                            "frameRate": {"ideal": 24, "max": 30},
-                            "advanced": [
-                                {"focusMode": "continuous"},
-                                {"exposureMode": "continuous"},
-                                {"whiteBalanceMode": "continuous"},
-                            ],
-                        },
-                        "audio": False,
-                    },
-                    rtc_configuration=RTC_CONFIGURATION,
-                    desired_playing_state=st.session_state["webrtc_playing"],
-                    async_processing=True,  # ✅ ajuda estabilidade
-                )
+        if ctx.video_processor:
+            # ✅ passa token para o processor (sem reconectar)
+            ctx.video_processor.scan_token = st.session_state["scan_token"]
+            st.info(ctx.video_processor.last_status)
 
-                if ctx.video_processor:
-                    st.info(ctx.video_processor.last_status)
+        # captura 1x por ciclo
+        if ctx.video_processor and ctx.video_processor.last_text and not st.session_state["qr_text_from_cam"]:
+            st.session_state["qr_text_from_cam"] = ctx.video_processor.last_text
 
-                if ctx.video_processor and not st.session_state.get("qr_text_from_cam"):
-                    st_autorefresh(interval=600, key=f"qr_refresh_{st.session_state['scan_nonce']}")
+            # beep no momento da captura
+            if st.session_state["audio_enabled"] and not st.session_state["qr_beeped"]:
+                beep()
+                st.session_state["qr_beeped"] = True
 
-                if ctx.video_processor and ctx.video_processor.last_text and not st.session_state.get("qr_text_from_cam"):
-                    st.session_state["qr_text_from_cam"] = ctx.video_processor.last_text
-
-                    # ✅ BIP IMEDIATO AO LER (precisa do áudio habilitado por clique)
-                    if st.session_state.get("audio_enabled") and not st.session_state.get("qr_beeped"):
-                        beep()
-                        st.session_state["qr_beeped"] = True
-
-                    st.rerun()
+            st.rerun()
 
         qr_text = st.text_area(
             "Conteúdo do QR (texto)",
@@ -617,7 +663,8 @@ with tab_desktop:
             key="qr_text_area",
         )
 
-        if qr_text.strip() and not (st.session_state.get("import_ok") and st.session_state.get("import_pedido")):
+        # decodifica e monta pedido (sem fechar câmera)
+        if qr_text.strip() and not st.session_state["import_ok"]:
             try:
                 meta = decode_qr_payload(qr_text)
             except Exception as e:
@@ -625,15 +672,9 @@ with tab_desktop:
                 meta = None
 
             if meta and isinstance(meta, dict) and meta.get("type") == "ORDER_MIN":
-                # bip 1x (som precisa estar ativado por clique)
-                if st.session_state.get("audio_enabled") and not st.session_state.get("qr_beeped"):
-                    beep()
-                    st.session_state["qr_beeped"] = True
-
                 st.session_state["import_ok"] = True
                 st.session_state["import_pedido"] = meta
-                st.session_state["scanning"] = False
-                st.rerun()
+                st.success("Pedido importado ✅ (câmera continua aberta)")
 
     with colB:
         st.markdown("### Pedido reproduzido")
@@ -641,10 +682,9 @@ with tab_desktop:
         if st.session_state.get("import_ok") and st.session_state.get("import_pedido"):
             pedido = st.session_state["import_pedido"]
 
-            st.markdown("**Cliente (completo)**")
+            st.markdown("**Cliente (mínimo)**")
             st.json(pedido["cliente"])
 
-            # itens do QR: só c/q/p
             itens_min = pd.DataFrame(pedido["itens"]).rename(
                 columns={"c": "codigo", "q": "qtde", "p": "preco_unit"}
             )
@@ -652,7 +692,6 @@ with tab_desktop:
             itens_min["qtde"] = itens_min["qtde"].astype(int)
             itens_min["preco_unit"] = itens_min["preco_unit"].astype(float)
 
-            # ✅ recupera descrição no tab_produto
             itens = itens_min.merge(
                 produtos[["codigo", "descricao"]],
                 on="codigo",
@@ -662,11 +701,11 @@ with tab_desktop:
             itens["subtotal"] = itens["qtde"] * itens["preco_unit"]
 
             st.markdown("**Itens**")
-            st.dataframe(itens[["codigo", "descricao", "qtde", "preco_unit", "subtotal"]], use_container_width=True, height=320)
-
+            st.dataframe(
+                itens[["codigo", "descricao", "qtde", "preco_unit", "subtotal"]],
+                use_container_width=True,
+                height=320,
+            )
             st.metric("Total", brl(float(itens["subtotal"].sum())))
-
-            with st.expander("Pedido (JSON bruto do QR)"):
-                st.json(pedido)
         else:
             st.info("Aguardando leitura do QR para reproduzir o pedido.")
