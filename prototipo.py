@@ -459,7 +459,8 @@ with tab_android:
 # =========================================================
 with tab_desktop:
     st.subheader("💻 Desktop — ler QR e reproduzir pedido (descrição via tab_produto)")
-
+    if "webrtc_playing" not in st.session_state:
+        st.session_state["webrtc_playing"] = True
     # estados base
     if "scanning" not in st.session_state:
         st.session_state["scanning"] = True
@@ -484,9 +485,11 @@ with tab_desktop:
         with b2:
             if st.button("🆕 Ler novo QR", use_container_width=True):
                 st.session_state["scanning"] = True
-                st.session_state["scan_nonce"] += 1
+                st.session_state["webrtc_playing"] = True  # ✅ volta a tocar sem recriar tudo
+
                 for k in ["qr_text_from_cam", "import_ok", "import_pedido", "qr_beeped", "qr_text_area"]:
                     st.session_state.pop(k, None)
+
                 st.rerun()
         with b3:
             if st.button("🧹 Limpar", use_container_width=True):
@@ -497,6 +500,7 @@ with tab_desktop:
 
         # se já tem pedido, fecha câmera e destaca
         if st.session_state.get("import_ok") and st.session_state.get("import_pedido"):
+            st.session_state["webrtc_playing"] = False
             st.session_state["scanning"] = False
             st.markdown(
                 """
@@ -551,7 +555,7 @@ with tab_desktop:
                 )
 
                 ctx = webrtc_streamer(
-                    key=f"qr-reader-{st.session_state['camera_facing_mode']}-{st.session_state['scan_nonce']}",
+                    key="qr-reader",  # ✅ FIXO (não muda a cada leitura)
                     video_processor_factory=QRVideoProcessor,
                     media_stream_constraints={
                         "video": {
@@ -562,7 +566,8 @@ with tab_desktop:
                         },
                         "audio": False,
                     },
-                    rtc_configuration=RTC_CONFIGURATION,  # ✅ aqui
+                    rtc_configuration=RTC_CONFIGURATION,
+                    desired_playing_state=st.session_state["webrtc_playing"],  # ✅ play/stop sem reconectar
                 )
 
                 if ctx.video_processor:
