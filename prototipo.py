@@ -476,25 +476,36 @@ with tab_desktop:
     with colA:
         st.markdown("### Leitor de QR Code")
 
-        b1, b2, b3 = st.columns(3)
+        b1, b2, b3, b4 = st.columns(4)
+
         with b1:
             if st.button("🔊 Ativar som", use_container_width=True):
                 st.session_state["audio_enabled"] = True
-                beep()
+                beep()  # só pra testar
                 st.success("Som ativado ✅")
+
         with b2:
             if st.button("🆕 Ler novo QR", use_container_width=True):
                 st.session_state["scanning"] = True
-                st.session_state["webrtc_playing"] = True  # ✅ volta a tocar sem recriar tudo
-
+                st.session_state["webrtc_playing"] = True
                 for k in ["qr_text_from_cam", "import_ok", "import_pedido", "qr_beeped", "qr_text_area"]:
                     st.session_state.pop(k, None)
-
                 st.rerun()
+
         with b3:
             if st.button("🧹 Limpar", use_container_width=True):
                 st.session_state["scanning"] = True
                 for k in ["qr_text_from_cam", "import_ok", "import_pedido", "qr_beeped", "qr_text_area"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+
+        with b4:
+            if st.button("🔄 Resetar câmera", use_container_width=True):
+                # ✅ aqui força renegociação limpa do WebRTC
+                st.session_state["webrtc_key_nonce"] += 1
+                st.session_state["webrtc_playing"] = True
+                st.session_state["scanning"] = True
+                for k in ["qr_text_from_cam", "qr_beeped", "qr_text_area"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
@@ -525,10 +536,12 @@ with tab_desktop:
             facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
             if "camera_facing_mode" not in st.session_state:
                 st.session_state["camera_facing_mode"] = facing_mode
-
-            if st.session_state["camera_facing_mode"] != facing_mode:
+                
+            if st.session_state.get("camera_facing_mode") != facing_mode:
                 st.session_state["camera_facing_mode"] = facing_mode
-                st.session_state["scan_nonce"] += 1
+                st.session_state["webrtc_key_nonce"] += 1  # ✅ força reset
+                st.session_state["webrtc_playing"] = True
+                st.session_state["scanning"] = True
                 for k in ["qr_text_from_cam", "qr_beeped", "qr_text_area"]:
                     st.session_state.pop(k, None)
                 st.rerun()
@@ -554,20 +567,28 @@ with tab_desktop:
                     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
                 )
 
+                webrtc_key = f"qr-reader-{st.session_state['webrtc_key_nonce']}"
+
                 ctx = webrtc_streamer(
-                    key="qr-reader",  # ✅ FIXO (não muda a cada leitura)
+                    key=webrtc_key,
                     video_processor_factory=QRVideoProcessor,
                     media_stream_constraints={
                         "video": {
-                            "facingMode": {"ideal": st.session_state["camera_facing_mode"]},
-                            "width": {"ideal": 1920},
-                            "height": {"ideal": 1080},
+                            "facingMode": st.session_state["camera_facing_mode"],  # ✅ string simples é mais compatível
+                            "width": {"ideal": 1280},
+                            "height": {"ideal": 720},
                             "frameRate": {"ideal": 24, "max": 30},
+                            "advanced": [
+                                {"focusMode": "continuous"},
+                                {"exposureMode": "continuous"},
+                                {"whiteBalanceMode": "continuous"},
+                            ],
                         },
                         "audio": False,
                     },
                     rtc_configuration=RTC_CONFIGURATION,
-                    desired_playing_state=st.session_state["webrtc_playing"],  # ✅ play/stop sem reconectar
+                    desired_playing_state=st.session_state["webrtc_playing"],
+                    async_processing=True,  # ✅ ajuda estabilidade
                 )
 
                 if ctx.video_processor:
