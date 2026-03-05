@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import io
 import json
-import zipfile
-import hashlib
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -12,6 +10,7 @@ import pandas as pd
 import streamlit as st
 import zlib
 import base64
+
 # QR (geração)
 import qrcode
 from PIL import Image
@@ -21,29 +20,75 @@ import cv2
 import av
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 from streamlit_autorefresh import st_autorefresh
-import time
+
 
 # =========================================================
-# DADOS MOCK (40 produtos + cliente completo)
+# PRODUTOS FIXOS (TAB_PRODUTO)
 # =========================================================
-def mock_produtos(n: int = 40) -> pd.DataFrame:
+PRODUTOS_RAW = """
+0000001 ; BULE COM INFUSOR - HORTICOOL GREEN 500ML ; 308,9
+0000002 ; BULE COM INFUSOR - HORTICOOL GREEN 1000M ; 401,58
+0000003 ; ACUCAREIRO HORTICOOL GREEN 150ML ; 142,94
+0000004 ; LEITEIRA HORTICOOL GREEN 150ML ; 118,09
+0000005 ; BULE COM INFUSOR E XICARA HOORTICOL GREE ; 358,33
+0000006 ; XICARA DE CHA E PIRES APPLE BLOSSOM HORT ; 149,16
+0000007 ; XICARA DE CHA E PIRES FLOR GEOMETRIA VER ; 149,16
+0000008 ; CAFE E PIRES HORTICOOL GREEN 100ML ; 105,65
+0000009 ; PRATO DE PAO LIMA HORTICOOL GREEN 16,5CM ; 93,21
+0000010 ; PRATO DE PAO PINK HORTICOOL GREEN 16.5CM ; 93,21
+0000011 ; PRATO DE SOBREMESA FLOR HORTICOOL GREEN ; 118,09
+0000012 ; PRATO DE SOBREMESA GEOMETRIA GREEN HORTI ; 118,09
+0000013 ; PRATO DE JANTAR FLOR DE MACA HORTICOOL G ; 149,16
+0000014 ; PRATO DE JANTAR GEOMETRIA HORTICOOL GREE ; 149,16
+0000015 ; PRATO FUNDO FLOR DE MACA HORTICOOL GREEN ; 130,5
+0000016 ; PRATO FUNDO GEOMETRIA HORTICOOL GREEN 22 ; 130,5
+0000017 ; TRAVESSA OBLONGA HORTICOOL GREEN 30CM 29 ; 149,16
+0000018 ; TRAVESSA OBLONGA HORTICOOL GREEN 35CM 34 ; 217,53
+0000019 ; BOWL HORTICOOL GREEN 17CM 700ML ; 124,28
+0000020 ; BOWL FLOR DE MACA HORTICOOL GREEN 17CM 7 ; 124,28
+0000021 ; SOPEIRA GREEN HORTICOOL 2.4L 2400ML ; 864,93
+0000022 ; CONJUNTO/2 CANECAS HORTICOOL 300ML ; 155,36
+0000023 ; PRATO DE DOCES 2 CAMADAS HORTICOOL GREEN ; 236,16
+0000024 ; PRATO DE DOCE 3 CAMADAS HORTICOOL GREEN ; 403,96
+0000025 ; TRAVESSA OVAL HORTICOOL GREEN 31CM 30.9x ; 186,46
+0000026 ; TIGELA FLOR DE MACA HORTICOOL GREEN 22CM ; 279,67
+0000027 ; TIGELA FLOR DE MACA HORTICOOL GREEN 12CM ; 80,8
+0000028 ; CESTA DE PIQUENIQUE HORTICOOL GREEN 38x2 ; 441,07
+0000029 ; TRILHO DE MESA HORTICOOL ; 286,99
+0000030 ; BULE COM INFUSOR - HORTICOOL PINK 500ML ; 308,9
+0000031 ; BULE COM INFUSOR - HORTICOOL PINK 1000ML ; 401,58
+0000032 ; ACUCAREIRO HORTICOOL PINK 150ML ; 142,94
+0000033 ; LEITEIRA HORTICOOL PINK 150ML ; 118,09
+0000034 ; BULE COM INFUSOR E XICARA HORTICOOL PINK ; 358,33
+0000035 ; XICARA DE CHA E PIRES APPLE BLOSSOM HORT ; 149,16
+0000036 ; XICARA DE CHA E PIRES GEOMETRICA BLOSSOM ; 149,16
+0000037 ; CAFE E PIRES HORTICOOL PINK 100ML ; 105,65
+0000038 ; PRATO DE PAO LIME HORTICOOL PINK 16,5CM ; 93,21
+0000039 ; PRATO DE SOBREMESA FLOR BLOSSOM PINK 20, ; 118,09
+0000040 ; PRATO DE SOBREMESA GEOMETRIA HORTICOOL P ; 118,09
+""".strip()
+
+
+def parse_produtos(raw: str) -> pd.DataFrame:
     rows = []
-    for i in range(1, n + 1):
-        codigo = f"P{i:05d}"
-        descricao = f"Produto Demonstração {i:02d} - Linha Feira"
-        estoque = 10 + (i * 3) % 80
-        preco = round(19.9 + i * 2.35, 2)
-        rows.append(
-            {
-                "codigo": codigo,
-                "descricao": descricao,
-                "estoque": int(estoque),
-                "preco": float(preco),
-            }
-        )
+    for line in raw.splitlines():
+        parts = [p.strip() for p in line.split(";")]
+        if len(parts) < 3:
+            continue
+        codigo = str(parts[0]).strip()
+        descricao = str(parts[1]).strip()
+        preco_txt = str(parts[2]).strip().replace(".", "").replace(",", ".")
+        try:
+            preco = float(preco_txt)
+        except ValueError:
+            preco = 0.0
+        rows.append({"codigo": codigo.zfill(7), "descricao": descricao, "preco": preco})
     return pd.DataFrame(rows)
 
 
+# =========================================================
+# CLIENTE
+# =========================================================
 def mock_cliente_completo() -> dict:
     return {
         "cnpj": "12.345.678/0001-90",
@@ -67,22 +112,22 @@ def mock_cliente_completo() -> dict:
             "whatsapp": "(41) 98888-7777",
         },
         "condicao_pagamento": "28/35/42",
-        "observacoes": "Cliente demonstrativo para validação do fluxo QR+ZIP.",
+        "observacoes": "Cliente demonstrativo para validação do fluxo QR.",
     }
 
 
 # =========================================================
-# UTIL: hash / QR / ZIP
+# UTIL: QR
 # =========================================================
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def brl(v: float) -> str:
+    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def make_qr_png(payload_text: str) -> bytes:
     qr = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=10,
+        box_size=8,
         border=3,
     )
     qr.add_data(payload_text)
@@ -93,46 +138,7 @@ def make_qr_png(payload_text: str) -> bytes:
     return buf.getvalue()
 
 
-def build_order_inline_payload(cliente: dict, itens_pedido: pd.DataFrame, order_id: str) -> dict:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    itens = []
-    for _, r in itens_pedido.iterrows():
-        itens.append(
-            {
-                "c": str(r["codigo"]),
-                "d": str(r["descricao"])[:40],  # corta p/ caber
-                "q": int(r["qtde"]),
-                "p": float(r["preco_unit"]),
-            }
-        )
-
-    total = float(sum(i["q"] * i["p"] for i in itens))
-
-    payload = {
-        "type": "ORDER_INLINE",
-        "v": 1,
-        "order_id": order_id,
-        "created_at": now,
-        "cliente": {
-            "cnpj": cliente.get("cnpj"),
-            "razao": cliente.get("razao_social"),
-            "fant": cliente.get("nome_fantasia"),
-            "tel": cliente.get("telefone"),
-            "cid": cliente.get("endereco", {}).get("cidade"),
-            "uf": cliente.get("endereco", {}).get("uf"),
-        },
-        "itens": itens,
-        "total": total,
-    }
-    return payload
-
-
 def encode_qr_payload(payload: dict) -> str:
-    """
-    Compacta JSON -> zlib -> base64.
-    Retorna um texto curto, bom para QR.
-    """
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     comp = zlib.compress(raw, level=9)
     b64 = base64.urlsafe_b64encode(comp).decode("ascii")
@@ -142,11 +148,9 @@ def encode_qr_payload(payload: dict) -> str:
 def decode_qr_payload(text: str) -> dict:
     text = text.strip()
 
-    # caso venha JSON puro
     if text.startswith("{"):
         return json.loads(text)
 
-    # aceita QR1: ou ZIONNE_PEDIDO: (ou qualquer PREFIXO:)
     if ":" in text:
         prefix, b64 = text.split(":", 1)
         if prefix in ("QR1", "ZIONNE_PEDIDO"):
@@ -156,8 +160,9 @@ def decode_qr_payload(text: str) -> dict:
 
     raise ValueError("Formato de QR não reconhecido")
 
+
 def beep():
-    # WebAudio: tende a funcionar melhor que <audio autoplay> no celular
+    # WebAudio: funciona melhor após clique/ação do usuário (política de autoplay do navegador)
     st.components.v1.html(
         """
         <script>
@@ -165,127 +170,119 @@ def beep():
           try {
             const AudioContext = window.AudioContext || window.webkitAudioContext;
             const ctx = new AudioContext();
-            // garante que está "running"
             if (ctx.state === "suspended") { await ctx.resume(); }
 
             const o = ctx.createOscillator();
             const g = ctx.createGain();
-
             o.type = "sine";
-            o.frequency.value = 880; // Hz (bipe agudo)
-            g.gain.value = 0.08;     // volume
-
-            o.connect(g);
-            g.connect(ctx.destination);
-
+            o.frequency.value = 880;
+            g.gain.value = 0.08;
+            o.connect(g); g.connect(ctx.destination);
             o.start();
-            setTimeout(() => {
-              o.stop();
-              ctx.close();
-            }, 120); // 120ms
-          } catch (e) {
-            console.log("beep blocked", e);
-          }
+            setTimeout(() => { o.stop(); ctx.close(); }, 120);
+          } catch (e) {}
         })();
         </script>
         """,
         height=0,
     )
 
-def read_zip_bytes(zip_bytes: bytes) -> dict[str, bytes]:
-    out: dict[str, bytes] = {}
-    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
-        for name in z.namelist():
-            out[name] = z.read(name)
-    return out
+
+# =========================================================
+# QR PAYLOAD (AGORA: cliente completo + itens mínimos)
+# =========================================================
+def build_order_payload_min(cliente: dict, carrinho: list[dict], order_id: str) -> dict:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    itens = []
+    total = 0.0
+    for item in carrinho:
+        codigo = str(item["codigo"]).zfill(7)
+        qtd = int(item["qtd"])
+        preco = float(item["preco"])  # preço do pedido vai dentro do QR
+        itens.append({"c": codigo, "q": qtd, "p": preco})
+        total += qtd * preco
+
+    return {
+        "type": "ORDER_MIN",
+        "v": 1,
+        "order_id": order_id,
+        "created_at": now,
+        "cliente": cliente,   # ✅ cliente completo
+        "itens": itens,       # ✅ só código + qtd + preço
+        "total": float(total),
+    }
 
 
 # =========================================================
-# WEBCAM: leitor de QR Code com OpenCV (Otimizado)
+# WEBCAM: leitor QR
 # =========================================================
 class QRVideoProcessor(VideoProcessorBase):
-    """
-    Leitor QR robusto com debounce para evitar flickering no Streamlit.
-    """
     def __init__(self):
         self.detector = cv2.QRCodeDetector()
         self.last_text: Optional[str] = None
         self.last_status: str = "Aguardando QR..."
-        self.last_decode_time = 0
-        self.debounce_seconds = 2.0  # Tempo mínimo entre leituras
+        self.last_decode_time = 0.0
+        self.debounce_seconds = 1.6
 
     def _try_decode(self, img_bgr):
-        # 1) tentativa direta
+        # 1) direto
         data, points, _ = self.detector.detectAndDecode(img_bgr)
         if data:
             return data, points
 
-        # 2) grayscale + upscale + leve contraste
+        # 2) upscale + equalize
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
         up = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
-        # 3) binarização (ajuda MUITO em QR denso na tela)
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        data2, points2, _ = self.detector.detectAndDecode(up)
+        if data2:
+            return data2, points2
+
+        # 3) threshold (ajuda MUITO em QR denso)
         thr = cv2.adaptiveThreshold(
             gray, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY,
             51, 2
         )
-
-        # às vezes decodifica melhor um pouco menor
-        thr_small = cv2.resize(thr, None, fx=0.7, fy=0.7, interpolation=cv2.INTER_NEAREST)
-
+        thr_small = cv2.resize(thr, None, fx=0.8, fy=0.8, interpolation=cv2.INTER_NEAREST)
         data3, points3, _ = self.detector.detectAndDecode(thr_small)
         if data3:
             return data3, points3
-        ##########################################
-        data2, points2, _ = self.detector.detectAndDecode(up)
-        if data2:
-            return data2, points2
 
-        # 3) se detectou pontos mas não decodificou, tenta recortar ROI
+        # 4) ROI se tiver pontos
         if points is not None:
             pts = points.astype(int).reshape(-1, 2)
             x, y, w, h = cv2.boundingRect(pts)
-            pad = 20
-            x0 = max(x - pad, 0)
-            y0 = max(y - pad, 0)
+            pad = 18
+            x0 = max(x - pad, 0); y0 = max(y - pad, 0)
             x1 = min(x + w + pad, img_bgr.shape[1])
             y1 = min(y + h + pad, img_bgr.shape[0])
             roi = img_bgr[y0:y1, x0:x1]
-
-            data3, points3, _ = self.detector.detectAndDecode(roi)
-            if data3:
-                return data3, points3
+            data4, points4, _ = self.detector.detectAndDecode(roi)
+            if data4:
+                return data4, points4
 
         return "", points
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
-        current_time = datetime.now().timestamp()
+        now_ts = datetime.now().timestamp()
 
         data, points = self._try_decode(img)
 
-        # Debounce: só atualiza se passou o tempo mínimo
-        if data and (current_time - self.last_decode_time > self.debounce_seconds):
+        if data and (now_ts - self.last_decode_time > self.debounce_seconds):
             self.last_text = data
             self.last_status = f"✅ QR lido ({len(data)} chars)"
-            self.last_decode_time = current_time
+            self.last_decode_time = now_ts
             cv2.putText(img, "QR LIDO", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
         elif points is not None:
             pts = points.astype(int).reshape(-1, 2)
             for i in range(len(pts)):
-                p1 = tuple(pts[i])
-                p2 = tuple(pts[(i + 1) % len(pts)])
+                p1 = tuple(pts[i]); p2 = tuple(pts[(i + 1) % len(pts)])
                 cv2.line(img, p1, p2, (0, 255, 0), 2)
-            
-            if self.last_text:
-                self.last_status = "⚠️ QR detectado, mantendo leitura anterior"
-                cv2.putText(img, "DETECTADO", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            else:
-                self.last_status = "⚠️ Detectou QR, mas não decodificou (aproxime / melhore luz)"
-                cv2.putText(img, "DETECTADO, NAO LIDO", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            self.last_status = "⚠️ Detectou QR (aproxime/melhore luz)"
         else:
             self.last_status = "Aguardando QR..."
             cv2.putText(img, "Aguardando QR...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
@@ -294,101 +291,178 @@ class QRVideoProcessor(VideoProcessorBase):
 
 
 # =========================================================
-# STREAMLIT APP
+# APP
 # =========================================================
-st.set_page_config(page_title="Protótipo QR + ZIP (Android -> Desktop)", layout="wide")
-st.title("📦 Protótipo de Validação — Fluxo QR Code + Arquivo ZIP")
-st.caption("Simula Android exportando ZIP + QR e Desktop lendo QR (câmera) e importando ZIP com validação (SHA-256).")
+st.set_page_config(page_title="Protótipo — Pedido via QR", layout="wide")
+st.title("🧾 Protótipo — Pedido via QR (Android → Desktop)")
+st.caption("Android monta pedido offline e gera QR. Desktop lê o QR e reconstrói o pedido usando tab_produto para descrição.")
+
 
 # Estado
-if "produtos" not in st.session_state:
-    st.session_state["produtos"] = mock_produtos(40)
 if "cliente" not in st.session_state:
     st.session_state["cliente"] = mock_cliente_completo()
+if "tab_produto" not in st.session_state:
+    st.session_state["tab_produto"] = parse_produtos(PRODUTOS_RAW)
+if "carrinho" not in st.session_state:
+    st.session_state["carrinho"] = []  # lista de dicts
 
-tab_android, tab_desktop = st.tabs(["📱 Android (simulação)", "💻 Desktop (simulação)"])
+
+tab_android, tab_desktop, tab_produto = st.tabs(
+    ["📱 Android (simulação)", "💻 Desktop (simulação)", "📦 tab_produto"]
+)
+
+# =========================================================
+# TAB_PRODUTO
+# =========================================================
+with tab_produto:
+    st.subheader("📦 tab_produto — código / descrição / preço")
+    st.dataframe(st.session_state["tab_produto"], use_container_width=True, height=520)
 
 
-# -------------------------
-# ANDROID (simulação)
-# -------------------------
+# =========================================================
+# ANDROID
+# =========================================================
 with tab_android:
-    st.subheader("📱 Android — montar pedido e gerar QR (pedido completo dentro do QR)")
+    st.subheader("📱 Android — catálogo em cards + carrinho")
 
-    col1, col2 = st.columns([1.2, 0.8], gap="large")
+    produtos = st.session_state["tab_produto"].copy()
 
-    with col1:
+    st.markdown(
+        """
+        <style>
+        .card-inner{padding:8px;}
+        .product-sku{font-size:12px;color:#64748b;font-weight:600;margin-bottom:2px;}
+        .product-desc{font-size:14px;font-weight:700;line-height:1.2;margin-bottom:6px;}
+        .product-price{font-size:16px;font-weight:800;margin-bottom:8px;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_left, col_right = st.columns([1.15, 0.85], gap="large")
+
+    with col_left:
         st.markdown("### Cliente (dados completos)")
         st.json(st.session_state["cliente"])
 
-        st.markdown("### Catálogo (40 produtos)")
-        produtos = st.session_state["produtos"].copy()
-        st.dataframe(produtos, use_container_width=True, height=320)
+        st.markdown("### Produtos (cards)")
+        # mostra cards em grade 2 colunas
+        grid_cols = st.columns(2, gap="small")
+        rc = 0
+        for _, row in produtos.iterrows():
+            codigo = str(row["codigo"]).zfill(7)
+            preco = float(row["preco"])
+            col = grid_cols[rc % 2]
+            with col:
+                ja_no_carrinho = any(item["codigo"] == codigo for item in st.session_state.carrinho)
 
-    with col2:
-        st.markdown("### Itens do pedido")
-        options = (produtos["codigo"] + " — " + produtos["descricao"]).tolist()
-        sel = st.multiselect("Selecione produtos", options=options)
+                card = st.container(border=True)
+                with card:
+                    st.markdown('<div class="card-inner">', unsafe_allow_html=True)
+                    st.markdown(f'<div class="product-sku">SKU {codigo}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="product-desc">{row["descricao"]}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="product-price">{brl(preco)}</div>', unsafe_allow_html=True)
 
-        itens = []
-        for opt in sel:
-            codigo = opt.split(" — ")[0]
-            p = produtos.loc[produtos["codigo"] == codigo].iloc[0]
-            qtde = st.number_input(f"Qtde {codigo}", min_value=1, max_value=9999, value=1, step=1)
-            itens.append(
-                {
-                    "codigo": codigo,
-                    "descricao": p["descricao"],
-                    "qtde": int(qtde),
-                    "preco_unit": float(p["preco"]),
-                    "subtotal": float(p["preco"]) * int(qtde),
-                }
+                    qtd = st.number_input(
+                        "Qtd",
+                        value=1,
+                        min_value=1,
+                        step=1,
+                        key=f"qtd_{codigo}_{rc}",
+                    )
+
+                    if st.button(
+                        "Adicionar ➕",
+                        key=f"add_{codigo}_{rc}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        if ja_no_carrinho:
+                            idx = next(
+                                i for i, item in enumerate(st.session_state.carrinho)
+                                if item["codigo"] == codigo
+                            )
+                            st.session_state.carrinho[idx]["qtd"] += int(qtd)
+                            st.session_state.carrinho[idx]["total"] = (
+                                st.session_state.carrinho[idx]["qtd"] * preco
+                            )
+                        else:
+                            st.session_state.carrinho.append(
+                                {
+                                    "codigo": codigo,
+                                    "qtd": int(qtd),
+                                    "preco": preco,
+                                    "total": float(int(qtd) * preco),
+                                }
+                            )
+                        st.rerun()
+
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            rc += 1
+
+    with col_right:
+        st.markdown("### 🛒 Carrinho")
+
+        if st.session_state.carrinho:
+            df_cart = pd.DataFrame(st.session_state.carrinho).copy()
+            df_cart["codigo"] = df_cart["codigo"].astype(str).str.zfill(7)
+
+            # enriquece o carrinho com descrição só pra exibição no Android
+            df_cart = df_cart.merge(
+                produtos[["codigo", "descricao"]],
+                on="codigo",
+                how="left",
             )
+            df_cart = df_cart[["codigo", "descricao", "qtd", "preco", "total"]]
+            df_cart["preco"] = df_cart["preco"].astype(float)
+            df_cart["total"] = df_cart["total"].astype(float)
 
-        itens_df = pd.DataFrame(itens) if itens else pd.DataFrame(
-            columns=["codigo", "descricao", "qtde", "preco_unit", "subtotal"]
-        )
+            st.dataframe(df_cart, use_container_width=True, height=350)
 
-        st.dataframe(itens_df, use_container_width=True, height=220)
+            total = float(df_cart["total"].sum())
+            st.metric("Total do Pedido", brl(total))
 
-        total = float(itens_df["subtotal"].sum()) if not itens_df.empty else 0.0
-        st.metric(
-            "Total do Pedido",
-            f"R$ {total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
-        )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("🧹 Limpar carrinho", use_container_width=True):
+                    st.session_state.carrinho = []
+                    for k in list(st.session_state.keys()):
+                        if str(k).startswith("qtd_") or str(k).startswith("add_"):
+                            pass
+                    st.rerun()
 
-        st.divider()
+            with c2:
+                if st.button("✅ Gerar QR do pedido", use_container_width=True, type="primary"):
+                    order_id = uuid.uuid4().hex[:10].upper()
+                    payload = build_order_payload_min(
+                        cliente=st.session_state["cliente"],
+                        carrinho=st.session_state.carrinho,
+                        order_id=order_id,
+                    )
+                    qr_text = encode_qr_payload(payload)
+                    st.session_state["last_qr_text"] = qr_text
+                    st.session_state["last_qr_png"] = make_qr_png(qr_text)
+                    st.rerun()
 
-        if st.button("✅ Gerar QR (pedido completo)", use_container_width=True, disabled=itens_df.empty):
-            order_id = uuid.uuid4().hex[:10].upper()
+        else:
+            st.info("Carrinho vazio. Adicione produtos nos cards ao lado.")
 
-            qr_payload = build_order_inline_payload(
-                cliente=st.session_state["cliente"],
-                itens_pedido=itens_df.drop(columns=["subtotal"], errors="ignore"),
-                order_id=order_id,
-            )
-
-            qr_text = encode_qr_payload(qr_payload)
-
-            st.session_state["last_qr_text"] = qr_text
-            st.session_state["last_qr_png"] = make_qr_png(qr_text)
-
-        # ✅ MOSTRAR QR (não depende de ZIP)
         if "last_qr_png" in st.session_state:
-            st.success("QR gerado! No Desktop, leia o QR para reproduzir o pedido completo.")
+            st.divider()
+            st.success("QR gerado! Leia no Desktop para reconstruir o pedido.")
             st.image(st.session_state["last_qr_png"], use_container_width=True)
-
             with st.expander("Ver conteúdo do QR (compactado)"):
                 st.code(st.session_state["last_qr_text"])
 
 
-# -------------------------
-# DESKTOP (simulação)
-# -------------------------
+# =========================================================
+# DESKTOP
+# =========================================================
 with tab_desktop:
-    st.subheader("💻 Desktop — ler QR e reproduzir o pedido completo (sem ZIP)")
+    st.subheader("💻 Desktop — ler QR e reproduzir pedido (descrição via tab_produto)")
 
-    # --- estado base ---
+    # estados base
     if "scanning" not in st.session_state:
         st.session_state["scanning"] = True
     if "scan_nonce" not in st.session_state:
@@ -396,63 +470,50 @@ with tab_desktop:
     if "audio_enabled" not in st.session_state:
         st.session_state["audio_enabled"] = False
 
-    # ✅ colunas SEMPRE criadas (corrige seu erro)
+    produtos = st.session_state["tab_produto"].copy()
+
     colA, colB = st.columns([1, 1], gap="large")
 
     with colA:
         st.markdown("### Leitor de QR Code")
-        st.caption("Quando ler, toca bip, fecha a câmera e destaca o pedido.")
 
-        # --- botões ---
-        cbtn1, cbtn2, cbtn3 = st.columns(3)
-
-        with cbtn1:
+        b1, b2, b3 = st.columns(3)
+        with b1:
             if st.button("🔊 Ativar som", use_container_width=True):
-                # Interação do usuário -> libera WebAudio no celular
                 st.session_state["audio_enabled"] = True
-                beep()  # teste imediato
+                beep()
                 st.success("Som ativado ✅")
-
-        with cbtn2:
+        with b2:
             if st.button("🆕 Ler novo QR", use_container_width=True):
                 st.session_state["scanning"] = True
                 st.session_state["scan_nonce"] += 1
-                for k in ["qr_text_from_cam","qr_captured_at","import_ok","import_pedido","qr_beeped","qr_text_area"]:
+                for k in ["qr_text_from_cam", "import_ok", "import_pedido", "qr_beeped", "qr_text_area"]:
                     st.session_state.pop(k, None)
                 st.rerun()
-
-        with cbtn3:
+        with b3:
             if st.button("🧹 Limpar", use_container_width=True):
                 st.session_state["scanning"] = True
-                for k in ["qr_text_from_cam","qr_captured_at","import_ok","import_pedido","qr_beeped","qr_text_area"]:
+                for k in ["qr_text_from_cam", "import_ok", "import_pedido", "qr_beeped", "qr_text_area"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
-        # ✅ se já tem pedido, "fecha" a câmera e mostra banner grande
+        # se já tem pedido, fecha câmera e destaca
         if st.session_state.get("import_ok") and st.session_state.get("import_pedido"):
             st.session_state["scanning"] = False
-
             st.markdown(
                 """
-                <div style="
-                    padding:16px;border-radius:14px;background:#0f172a;color:white;
-                    font-size:26px;font-weight:800;text-align:center;margin-top:10px;">
+                <div style="padding:16px;border-radius:14px;background:#0f172a;color:white;
+                            font-size:26px;font-weight:800;text-align:center;margin-top:10px;">
                     ✅ PEDIDO CODIFICADO
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
             st.caption("Clique em **Ler novo QR** para escanear outro.")
-            st.text_area(
-                "Conteúdo do QR (texto)",
-                value=st.session_state.get("qr_text_from_cam", ""),
-                height=90,
-                key="qr_text_area",
-            )
 
         else:
-            # --- seleção de câmera ---
             st.markdown("### Câmera")
+
             camera_mode_label = st.selectbox(
                 "Escolha a câmera",
                 ["Traseira (recomendada)", "Frontal"],
@@ -460,18 +521,16 @@ with tab_desktop:
                 key="camera_select",
             )
             facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
-
             if "camera_facing_mode" not in st.session_state:
                 st.session_state["camera_facing_mode"] = facing_mode
 
             if st.session_state["camera_facing_mode"] != facing_mode:
                 st.session_state["camera_facing_mode"] = facing_mode
                 st.session_state["scan_nonce"] += 1
-                for k in ["qr_text_from_cam","qr_captured_at","qr_beeped","qr_text_area"]:
+                for k in ["qr_text_from_cam", "qr_beeped", "qr_text_area"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
-            # visor menor
             st.markdown(
                 """
                 <style>
@@ -481,7 +540,6 @@ with tab_desktop:
                 unsafe_allow_html=True,
             )
 
-            # --- câmera só quando scanning=True ---
             if st.session_state.get("scanning", True):
                 ctx = webrtc_streamer(
                     key=f"qr-reader-{st.session_state['camera_facing_mode']}-{st.session_state['scan_nonce']}",
@@ -500,59 +558,65 @@ with tab_desktop:
 
                 if ctx.video_processor and ctx.video_processor.last_text and not st.session_state.get("qr_text_from_cam"):
                     st.session_state["qr_text_from_cam"] = ctx.video_processor.last_text
-                    st.session_state["qr_captured_at"] = datetime.now().strftime("%H:%M:%S")
                     st.rerun()
 
-            qr_text = st.text_area(
-                "Conteúdo do QR (texto)",
-                value=st.session_state.get("qr_text_from_cam", ""),
-                height=100,
-                key="qr_text_area",
-            )
+        qr_text = st.text_area(
+            "Conteúdo do QR (texto)",
+            value=st.session_state.get("qr_text_from_cam", ""),
+            height=110,
+            key="qr_text_area",
+        )
 
-            if st.session_state.get("qr_captured_at"):
-                st.caption(f"Capturado às {st.session_state['qr_captured_at']}")
+        if qr_text.strip() and not (st.session_state.get("import_ok") and st.session_state.get("import_pedido")):
+            try:
+                meta = decode_qr_payload(qr_text)
+            except Exception as e:
+                st.error(f"Não consegui decodificar o QR: {e}")
+                meta = None
 
-            # decodifica
-            meta = None
-            meta_err = None
-            if qr_text.strip():
-                try:
-                    meta = decode_qr_payload(qr_text)
-                except Exception as e:
-                    meta_err = str(e)
-
-            if meta and isinstance(meta, dict) and meta.get("type") == "ORDER_INLINE":
-                # ✅ beep 1x (apenas se som foi ativado)
+            if meta and isinstance(meta, dict) and meta.get("type") == "ORDER_MIN":
+                # bip 1x (som precisa estar ativado por clique)
                 if st.session_state.get("audio_enabled") and not st.session_state.get("qr_beeped"):
                     beep()
                     st.session_state["qr_beeped"] = True
 
                 st.session_state["import_ok"] = True
                 st.session_state["import_pedido"] = meta
-                st.session_state["scanning"] = False  # fecha câmera
+                st.session_state["scanning"] = False
                 st.rerun()
-            elif qr_text.strip():
-                st.error(f"QR lido, mas não consegui decodificar o pedido: {meta_err}")
 
     with colB:
         st.markdown("### Pedido reproduzido")
+
         if st.session_state.get("import_ok") and st.session_state.get("import_pedido"):
             pedido = st.session_state["import_pedido"]
 
-            st.markdown("**Cliente**")
+            st.markdown("**Cliente (completo)**")
             st.json(pedido["cliente"])
 
-            st.markdown("**Itens**")
-            itens_df = pd.DataFrame(pedido["itens"]).rename(
-                columns={"c": "codigo", "d": "descricao", "q": "qtde", "p": "preco_unit"}
+            # itens do QR: só c/q/p
+            itens_min = pd.DataFrame(pedido["itens"]).rename(
+                columns={"c": "codigo", "q": "qtde", "p": "preco_unit"}
             )
-            itens_df["subtotal"] = itens_df["qtde"] * itens_df["preco_unit"]
-            st.dataframe(itens_df, use_container_width=True, height=300)
+            itens_min["codigo"] = itens_min["codigo"].astype(str).str.zfill(7)
+            itens_min["qtde"] = itens_min["qtde"].astype(int)
+            itens_min["preco_unit"] = itens_min["preco_unit"].astype(float)
 
-            st.metric(
-                "Total",
-                f'R$ {float(pedido["total"]):,.2f}'.replace(",", "X").replace(".", ",").replace("X", "."),
+            # ✅ recupera descrição no tab_produto
+            itens = itens_min.merge(
+                produtos[["codigo", "descricao"]],
+                on="codigo",
+                how="left",
             )
+            itens["descricao"] = itens["descricao"].fillna("**PRODUTO NÃO ENCONTRADO NA TAB_PRODUTO**")
+            itens["subtotal"] = itens["qtde"] * itens["preco_unit"]
+
+            st.markdown("**Itens**")
+            st.dataframe(itens[["codigo", "descricao", "qtde", "preco_unit", "subtotal"]], use_container_width=True, height=320)
+
+            st.metric("Total", brl(float(itens["subtotal"].sum())))
+
+            with st.expander("Pedido (JSON bruto do QR)"):
+                st.json(pedido)
         else:
             st.info("Aguardando leitura do QR para reproduzir o pedido.")
