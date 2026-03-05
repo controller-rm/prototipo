@@ -126,13 +126,13 @@ def brl(v: float) -> str:
 def make_qr_png(payload_text: str) -> bytes:
     qr = qrcode.QRCode(
         version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=8,
-        border=3,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,  # <- era M
+        box_size=12,                                        # <- era 8
+        border=4,                                           # <- era 3
     )
     qr.add_data(payload_text)
     qr.make(fit=True)
-    img: Image.Image = qr.make_image(fill_color="black", back_color="white")
+    img = qr.make_image(fill_color="black", back_color="white")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -196,23 +196,35 @@ def build_order_payload_min(cliente: dict, carrinho: list[dict], order_id: str) 
 
     itens = []
     total = 0.0
+
     for item in carrinho:
         codigo = str(item["codigo"]).zfill(7)
         qtd = int(item["qtd"])
-        preco = float(item["preco"])  # preço do pedido vai dentro do QR
-        itens.append({"c": codigo, "q": qtd, "p": preco})
+        preco = float(item["preco"])
+
+        itens.append({
+            "c": codigo,   # código produto
+            "q": qtd,      # quantidade
+            "p": preco     # preço unitário
+        })
+
         total += qtd * preco
+
+    # 🔹 cliente mínimo
+    cliente_min = {
+        "cnpj": cliente.get("cnpj"),
+        "razao_social": cliente.get("razao_social")
+    }
 
     return {
         "type": "ORDER_MIN",
         "v": 1,
         "order_id": order_id,
         "created_at": now,
-        "cliente": cliente,   # ✅ cliente completo
-        "itens": itens,       # ✅ só código + qtd + preço
+        "cliente": cliente_min,  # ✅ agora só CNPJ + Razão Social
+        "itens": itens,
         "total": float(total),
     }
-
 
 # =========================================================
 # WEBCAM: leitor QR
@@ -451,7 +463,7 @@ with tab_android:
         if "last_qr_png" in st.session_state:
             st.divider()
             st.success("QR gerado! Leia no Desktop para reconstruir o pedido.")
-            st.image(st.session_state["last_qr_png"], use_container_width=True)
+            st.image(st.session_state["last_qr_png"], width=520)
             with st.expander("Ver conteúdo do QR (compactado)"):
                 st.code(st.session_state["last_qr_text"])
 
