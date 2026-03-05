@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import io
 import json
 import uuid
@@ -229,77 +227,46 @@ def build_order_payload_min(cliente: dict, carrinho: list[dict], order_id: str) 
 # =========================================================
 # WEBCAM: leitor QR
 # =========================================================
+import zxingcpp
+import cv2
+from datetime import datetime
+from typing import Optional
+from streamlit_webrtc import VideoProcessorBase
+
 class QRVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.detector = cv2.QRCodeDetector()
         self.last_text: Optional[str] = None
         self.last_status: str = "Aguardando QR..."
         self.last_decode_time = 0.0
-        self.debounce_seconds = 1.6
+        self.debounce_seconds = 1.2
 
     def _try_decode(self, img_bgr):
-        # 1) direto
-        data, points, _ = self.detector.detectAndDecode(img_bgr)
-        if data:
-            return data, points
-
-        # 2) upscale + equalize
+        # ZXing trabalha muito bem com grayscale
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
-        up = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
-        data2, points2, _ = self.detector.detectAndDecode(up)
-        if data2:
-            return data2, points2
 
-        # 3) threshold (ajuda MUITO em QR denso)
-        thr = cv2.adaptiveThreshold(
-            gray, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            51, 2
-        )
-        thr_small = cv2.resize(thr, None, fx=0.8, fy=0.8, interpolation=cv2.INTER_NEAREST)
-        data3, points3, _ = self.detector.detectAndDecode(thr_small)
-        if data3:
-            return data3, points3
+        # Dica: leve upscale ajuda em QR denso
+        gray = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_LINEAR)
 
-        # 4) ROI se tiver pontos
-        if points is not None:
-            pts = points.astype(int).reshape(-1, 2)
-            x, y, w, h = cv2.boundingRect(pts)
-            pad = 18
-            x0 = max(x - pad, 0); y0 = max(y - pad, 0)
-            x1 = min(x + w + pad, img_bgr.shape[1])
-            y1 = min(y + h + pad, img_bgr.shape[0])
-            roi = img_bgr[y0:y1, x0:x1]
-            data4, points4, _ = self.detector.detectAndDecode(roi)
-            if data4:
-                return data4, points4
+        results = zxingcpp.read_barcodes(gray)
+        if results:
+            # pega o primeiro QR encontrado
+            return results[0].text
+        return ""
 
-        return "", points
-
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+    def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         now_ts = datetime.now().timestamp()
 
-        data, points = self._try_decode(img)
+        data = self._try_decode(img)
 
         if data and (now_ts - self.last_decode_time > self.debounce_seconds):
             self.last_text = data
             self.last_status = f"✅ QR lido ({len(data)} chars)"
             self.last_decode_time = now_ts
-            cv2.putText(img, "QR LIDO", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-        elif points is not None:
-            pts = points.astype(int).reshape(-1, 2)
-            for i in range(len(pts)):
-                p1 = tuple(pts[i]); p2 = tuple(pts[(i + 1) % len(pts)])
-                cv2.line(img, p1, p2, (0, 255, 0), 2)
-            self.last_status = "⚠️ Detectou QR (aproxime/melhore luz)"
         else:
             self.last_status = "Aguardando QR..."
-            cv2.putText(img, "Aguardando QR...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+        return frame
 
 
 # =========================================================
@@ -543,21 +510,28 @@ with tab_desktop:
                     st.session_state.pop(k, None)
                 st.rerun()
 
-            st.markdown(
-                """
-                <style>
-                video { max-width: 320px !important; max-height: 200px !important; border-radius: 10px; }
-                </style>
-                """,
-                unsafe_allow_html=True,
-            )
+            st.markdown("""
+            <style>
+            video {
+            width: 100% !important;
+            max-width: 720px !important;
+            height: auto !important;
+            border-radius: 10px;
+            }
+            </style>
+            """, unsafe_allow_html=True)
 
             if st.session_state.get("scanning", True):
                 ctx = webrtc_streamer(
                     key=f"qr-reader-{st.session_state['camera_facing_mode']}-{st.session_state['scan_nonce']}",
                     video_processor_factory=QRVideoProcessor,
                     media_stream_constraints={
-                        "video": {"facingMode": st.session_state["camera_facing_mode"]},
+                        "video": {
+                        "facingMode": st.session_state["camera_facing_mode"],
+                        "width":  {"ideal": 1280},
+                        "height": {"ideal": 720},
+                        "frameRate": {"ideal": 30, "max": 30},
+                        },
                         "audio": False,
                     },
                 )
