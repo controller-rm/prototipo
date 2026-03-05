@@ -247,10 +247,24 @@ class QRVideoProcessor(VideoProcessorBase):
 
     def _try_decode(self, img_bgr):
         # ZXing trabalha muito bem com grayscale
+        h, w = img_bgr.shape[:2]
+        pad = 0.12  # corta bordas -> efeito zoom
+        x0 = int(w * pad); x1 = int(w * (1 - pad))
+        y0 = int(h * pad); y1 = int(h * (1 - pad))
+        img_bgr = img_bgr[y0:y1, x0:x1]
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-        # Dica: leve upscale ajuda em QR denso
-        gray = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_LINEAR)
+        # 1) Upscale leve
+        gray = cv2.resize(gray, None, fx=1.6, fy=1.6, interpolation=cv2.INTER_CUBIC)
+
+        # 2) Contraste local (ajuda MUITO em QR denso)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+
+        # 3) Sharpen leve
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
+        gray = cv2.addWeighted(gray, 1.6, blur, -0.6, 0)
 
         results = zxingcpp.read_barcodes(gray)
         if results:
@@ -535,11 +549,18 @@ with tab_desktop:
                     video_processor_factory=QRVideoProcessor,
                     media_stream_constraints={
                     "video": {
-                        "facingMode": st.session_state["camera_facing_mode"],
-                        "width": {"ideal": 1280},
-                        "height": {"ideal": 720},
+                        "facingMode": {"ideal": st.session_state["camera_facing_mode"]},  # ideal em vez de string
+                        "width": {"ideal": 1920},
+                        "height": {"ideal": 1080},
                         "aspectRatio": {"ideal": 16/9},
-                        "frameRate": {"ideal": 30, "max": 30},
+                        "frameRate": {"ideal": 24, "max": 30},
+
+                        # Alguns browsers respeitam isso (principalmente mobile):
+                        "advanced": [
+                        {"focusMode": "continuous"},
+                        {"exposureMode": "continuous"},
+                        {"whiteBalanceMode": "continuous"},
+                        ],
                     },
                     "audio": False,
                     },
@@ -553,6 +574,12 @@ with tab_desktop:
 
                 if ctx.video_processor and ctx.video_processor.last_text and not st.session_state.get("qr_text_from_cam"):
                     st.session_state["qr_text_from_cam"] = ctx.video_processor.last_text
+
+                    # ✅ BIP IMEDIATO AO LER (precisa do áudio habilitado por clique)
+                    if st.session_state.get("audio_enabled") and not st.session_state.get("qr_beeped"):
+                        beep()
+                        st.session_state["qr_beeped"] = True
+
                     st.rerun()
 
         qr_text = st.text_area(
