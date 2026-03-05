@@ -427,28 +427,28 @@ with tab_android:
                 st.code(st.session_state["last_qr_text"])
 
 # =========================================================
-# DESKTOP (CÂMERA SEMPRE ABERTA + AUTO-CAPTURA + NOVO QR LIMPA E REARMA)
+# DESKTOP (LEITOR ROBUSTO: +QUALIDADE +AUTOFOCO/EXPOSIÇÃO +PIPELINE MELHOR)
 # =========================================================
 with tab_desktop:
     st.subheader("💻 Desktop — ler QR e reproduzir pedido (descrição via tab_produto)")
 
     # -------------------------
-    # Estados (profissional / produtivo)
+    # Estados
     # -------------------------
-    st.session_state.setdefault("scan_token", 0)              # ciclo atual de leitura
+    st.session_state.setdefault("scan_token", 0)
     st.session_state.setdefault("import_ok", False)
     st.session_state.setdefault("import_pedido", None)
-    st.session_state.setdefault("imported_token", -1)         # token em que importou com sucesso
-    st.session_state.setdefault("cleared_token", -1)          # token em que limpamos o processor
-    st.session_state.setdefault("camera_facing_mode", "environment")
+    st.session_state.setdefault("imported_token", -1)
+    st.session_state.setdefault("cleared_token", -1)
 
     produtos = st.session_state["tab_produto"].copy()
 
     # -------------------------
-    # Processor (mantém câmera viva; rearma via scan_token)
+    # Processor (robusto)
     # -------------------------
     import zxingcpp
     import cv2
+    import numpy as np
     from streamlit_webrtc import RTCConfiguration, VideoProcessorBase
 
     class QRVideoProcessor(VideoProcessorBase):
@@ -456,7 +456,7 @@ with tab_desktop:
             self.last_text: Optional[str] = None
             self.last_status: str = "Aguardando QR..."
             self.last_decode_time = 0.0
-            self.debounce_seconds = 1.0
+            self.debounce_seconds = 0.9
 
             self.scan_token = 0
             self._seen_token = 0
@@ -467,35 +467,68 @@ with tab_desktop:
             self.last_status = "Aguardando QR..."
             self.last_decode_time = 0.0
 
+        def _crop_center(self, img_bgr, pad=0.06):
+            # Menos corte que antes -> não “perde” QR grande e também ajuda foco
+            h, w = img_bgr.shape[:2]
+            x0 = int(w * pad); x1 = int(w * (1 - pad))
+            y0 = int(h * pad); y1 = int(h * (1 - pad))
+            return img_bgr[y0:y1, x0:x1]
+
+        def _prep_variants(self, gray: np.ndarray):
+            """
+            Gera variantes para lidar com foco oscilando:
+            - CLAHE + sharpen
+            - Adaptive threshold (bom para contraste ruim / desfoque leve)
+            """
+            out = []
+
+            # 1) CLAHE
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            g1 = clahe.apply(gray)
+
+            # sharpen leve
+            blur = cv2.GaussianBlur(g1, (0, 0), 1.0)
+            g1s = cv2.addWeighted(g1, 1.6, blur, -0.6, 0)
+            out.append(g1s)
+
+            # 2) threshold adaptativo (ajuda MUITO quando “não foca”)
+            g2 = cv2.GaussianBlur(gray, (5, 5), 0)
+            th = cv2.adaptiveThreshold(
+                g2, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                31, 2
+            )
+            out.append(th)
+
+            return out
+
         def _try_decode(self, img_bgr):
-            # performance: tenta decodificar 1 a cada 2 frames
+            # Performance: tenta decodificar ~15 fps (1 a cada 2 frames em 30 fps)
             self._frame_i += 1
             if self._frame_i % 2 != 0:
                 return ""
 
-            h, w = img_bgr.shape[:2]
-            pad = 0.12
-            x0 = int(w * pad); x1 = int(w * (1 - pad))
-            y0 = int(h * pad); y1 = int(h * (1 - pad))
-            img_bgr = img_bgr[y0:y1, x0:x1]
+            img_bgr = self._crop_center(img_bgr, pad=0.06)
+            gray0 = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            gray = cv2.resize(gray, None, fx=1.6, fy=1.6, interpolation=cv2.INTER_CUBIC)
+            # 🔥 Multi-scale: tenta 2 escalas (ajuda QR pequeno / distância)
+            for scale in (1.4, 2.0):
+                gray = cv2.resize(gray0, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            gray = clahe.apply(gray)
+                # tenta com 2 variantes (CLAHE/sharpen e threshold)
+                for variant in self._prep_variants(gray):
+                    results = zxingcpp.read_barcodes(variant)
+                    if results:
+                        return results[0].text
 
-            blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
-            gray = cv2.addWeighted(gray, 1.6, blur, -0.6, 0)
-
-            results = zxingcpp.read_barcodes(gray)
-            return results[0].text if results else ""
+            return ""
 
         def recv(self, frame):
             img = frame.to_ndarray(format="bgr24")
             now_ts = datetime.now().timestamp()
 
-            # se token mudou, rearma leitura (sem reconectar a câmera)
+            # Rearma sem reconectar
             if self.scan_token != self._seen_token:
                 self._seen_token = self.scan_token
                 self.reset_for_new_scan()
@@ -512,18 +545,17 @@ with tab_desktop:
             return frame
 
     # -------------------------
-    # Função: limpar pedido + rearme
+    # Função: Novo QR
     # -------------------------
     def arm_new_scan():
         st.session_state["scan_token"] += 1
         st.session_state["import_ok"] = False
         st.session_state["import_pedido"] = None
         st.session_state["imported_token"] = -1
-        # cleared_token será aplicado no processor (assim que ctx existir)
         st.rerun()
 
     # -------------------------
-    # Layout
+    # UI
     # -------------------------
     colA, colB = st.columns([1, 1], gap="large")
 
@@ -535,15 +567,14 @@ with tab_desktop:
             if st.button("🆕 Novo QR", use_container_width=True, type="primary"):
                 arm_new_scan()
         with c2:
-            st.caption("Câmera sempre aberta • Captura automática • 1 clique para rearmar")
+            st.caption("Câmera sempre aberta • Captura automática • Pipeline reforçado")
 
-        # CSS do vídeo (padronizado)
         st.markdown("""
         <style>
         video {
             width: 100% !important;
-            max-width: 720px !important;
-            height: 420px !important;
+            max-width: 840px !important;
+            height: 480px !important;
             object-fit: cover !important;
             border-radius: 12px;
             background: #000;
@@ -558,51 +589,56 @@ with tab_desktop:
             key="camera_select",
         )
         facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
-        st.session_state["camera_facing_mode"] = facing_mode
 
         RTC_CONFIGURATION = RTCConfiguration(
             {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
         )
 
+        # ✅ Constraints “mais agressivas” de qualidade
+        # Observação: o navegador pode ignorar parte disso, mas geralmente melhora.
+        media_constraints = {
+            "video": {
+                "facingMode": facing_mode,
+                # tente alta resolução (o browser escolhe a melhor disponível)
+                "width": {"ideal": 3840, "min": 1280},
+                "height": {"ideal": 2160, "min": 720},
+                # fps menor ajuda nitidez (menos motion blur)
+                "frameRate": {"ideal": 20, "max": 24},
+                # tenta recursos de câmera (nem sempre disponíveis)
+                "advanced": [
+                    {"focusMode": "continuous"},
+                    {"exposureMode": "continuous"},
+                    {"whiteBalanceMode": "continuous"},
+                    # alguns devices aceitam:
+                    {"sharpness": 1.0},
+                    {"contrast": 1.0},
+                ],
+            },
+            "audio": False,
+        }
+
         ctx = webrtc_streamer(
-            key="qr-reader",  # FIXO: não reconecta
+            key="qr-reader",
             video_processor_factory=QRVideoProcessor,
             rtc_configuration=RTC_CONFIGURATION,
-            media_stream_constraints={
-                "video": {
-                    "facingMode": st.session_state["camera_facing_mode"],
-                    "width": {"ideal": 1280},
-                    "height": {"ideal": 720},
-                    "frameRate": {"ideal": 24, "max": 30},
-                    "advanced": [
-                        {"focusMode": "continuous"},
-                        {"exposureMode": "continuous"},
-                        {"whiteBalanceMode": "continuous"},
-                    ],
-                },
-                "audio": False,
-            },
+            media_stream_constraints=media_constraints,
             async_processing=True,
         )
 
-        # ✅ Sempre “pinga” a tela enquanto não importou
-        # Isso é o que faz a captura acontecer SEM clicar em nada.
+        # ✅ Mantém vivo para capturar sem clique
         if not st.session_state["import_ok"]:
-            st_autorefresh(interval=250, key=f"poll_scan_{st.session_state['scan_token']}")
+            st_autorefresh(interval=220, key=f"poll_scan_{st.session_state['scan_token']}")
 
         if ctx.video_processor:
-            # passa o token do ciclo atual para o processor
             ctx.video_processor.scan_token = st.session_state["scan_token"]
             st.info(ctx.video_processor.last_status)
 
-            # ✅ LIMPEZA REAL (no processor) — 1 clique resolve
-            # Se mudamos o scan_token, garantimos que o last_text do processor zere agora.
+            # Limpeza real do processor por token
             if st.session_state["cleared_token"] != st.session_state["scan_token"]:
                 ctx.video_processor.reset_for_new_scan()
                 st.session_state["cleared_token"] = st.session_state["scan_token"]
-                # não precisa rerun aqui; o autorefresh já mantém vivo
 
-            # ✅ IMPORTAÇÃO AUTOMÁTICA AO DETECTAR QR (sem botão)
+            # Importação automática
             if (
                 ctx.video_processor.last_text
                 and (st.session_state["imported_token"] != st.session_state["scan_token"])
@@ -619,7 +655,7 @@ with tab_desktop:
                     st.session_state["import_ok"] = True
                     st.session_state["import_pedido"] = meta
                     st.session_state["imported_token"] = st.session_state["scan_token"]
-                    st.rerun()  # atualiza painel da direita imediatamente
+                    st.rerun()
 
     with colB:
         st.markdown("### Pedido reproduzido")
