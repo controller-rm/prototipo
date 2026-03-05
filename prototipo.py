@@ -162,34 +162,7 @@ def decode_qr_payload(text: str) -> dict:
 import uuid
 import streamlit as st
 
-def beep():
-    nonce = uuid.uuid4().hex  # força re-render do iframe
-    st.components.v1.html(
-        f"""
-        <div id="{nonce}"></div>
-        <script>
-        (async () => {{
-          try {{
-            const AudioContext = window.AudioContext || window.webkitAudioContext;
-            const ctx = new AudioContext();
-            if (ctx.state === "suspended") {{ await ctx.resume(); }}
 
-            const o = ctx.createOscillator();
-            const g = ctx.createGain();
-            o.type = "sine";
-            o.frequency.value = 880;
-            g.gain.value = 0.10;   // um pouco mais alto
-            o.connect(g); g.connect(ctx.destination);
-            o.start();
-            setTimeout(() => {{ o.stop(); ctx.close(); }}, 140);
-          }} catch (e) {{
-            console.log(e);
-          }}
-        }})();
-        </script>
-        """,
-        height=0,
-    )
 
 # =========================================================
 # QR PAYLOAD (AGORA: cliente completo + itens mínimos)
@@ -463,12 +436,11 @@ with tab_desktop:
     # -------------------------
     # Estados
     # -------------------------
-    st.session_state.setdefault("audio_enabled", False)
-    st.session_state.setdefault("scan_token", 0)          # rearma leitura
+    st.session_state.setdefault("scan_token", 0)
     st.session_state.setdefault("import_ok", False)
     st.session_state.setdefault("import_pedido", None)
-    st.session_state.setdefault("qr_beeped", False)
-    st.session_state.setdefault("last_scan_token_done", -1)  # evita reimportar no mesmo ciclo
+    st.session_state.setdefault("last_scan_token_done", -1)
+    st.session_state.setdefault("pending_clear", False)  # ✅ novo
 
     produtos = st.session_state["tab_produto"].copy()
 
@@ -548,21 +520,18 @@ with tab_desktop:
         st.markdown("### Leitor de QR Code")
 
         b1, b2 = st.columns(2)
+        
         with b1:
-            if st.button("🔊 Ativar som", use_container_width=True):
-                st.session_state["audio_enabled"] = True
-                beep()
-                st.success("Som ativado ✅")
-
-        with b2:
             if st.button("🆕 Novo QR", use_container_width=True, type="primary"):
-                # ✅ o próprio botão faz tudo: limpa + rearma
                 st.session_state["scan_token"] += 1
                 st.session_state["import_ok"] = False
                 st.session_state["import_pedido"] = None
-                st.session_state["qr_beeped"] = False
                 st.session_state["last_scan_token_done"] = -1
+                st.session_state["pending_clear"] = True  # ✅ força limpar o last_text do processor
                 st.rerun()
+        
+        with b2:
+            st.caption("Câmera fica sempre aberta ✅")
 
         # CSS do vídeo
         st.markdown("""
@@ -611,43 +580,27 @@ with tab_desktop:
             async_processing=True,
         )
 
-        if ctx.video_processor:
-            ctx.video_processor.scan_token = st.session_state["scan_token"]
-            st.info(ctx.video_processor.last_status)
-
-            # ✅ FAZ O APP "ENXERGAR" O last_text SEM PRECISAR CLICAR
-            if not st.session_state["import_ok"]:
-                st_autorefresh(
-                    interval=350,  # ms (ajuste 250~600)
-                    key=f"qr_poll_{st.session_state['scan_token']}",
-                )
-
-            # ✅ IMPORTAÇÃO AUTOMÁTICA AO LER
-            if (
-                ctx.video_processor.last_text
-                and (st.session_state["last_scan_token_done"] != st.session_state["scan_token"])
-                and (not st.session_state["import_ok"])
-            ):
-                qr_text = ctx.video_processor.last_text
-
-                if st.session_state["audio_enabled"] and not st.session_state["qr_beeped"]:
-                    beep()
-                    st.session_state["qr_beeped"] = True
-
-                try:
-                    meta = decode_qr_payload(qr_text)
-                except Exception as e:
-                    st.error(f"Não consegui decodificar o QR: {e}")
-                    meta = None
-
-                if meta and isinstance(meta, dict) and meta.get("type") == "ORDER_MIN":
-                    st.session_state["import_ok"] = True
-                    st.session_state["import_pedido"] = meta
-                    st.session_state["last_scan_token_done"] = st.session_state["scan_token"]
-                    st.success("Pedido importado ✅")
-                    st.rerun()
-                else:
-                    st.session_state["last_scan_token_done"] = st.session_state["scan_token"]
+        if (
+            ctx.video_processor
+            and ctx.video_processor.last_text
+            and (st.session_state["last_scan_token_done"] != st.session_state["scan_token"])
+            and (not st.session_state["import_ok"])
+        ):
+            qr_text = ctx.video_processor.last_text
+        
+            try:
+                meta = decode_qr_payload(qr_text)
+            except Exception as e:
+                st.error(f"Não consegui decodificar o QR: {e}")
+                meta = None
+        
+            if meta and isinstance(meta, dict) and meta.get("type") == "ORDER_MIN":
+                st.session_state["import_ok"] = True
+                st.session_state["import_pedido"] = meta
+                st.session_state["last_scan_token_done"] = st.session_state["scan_token"]
+                st.rerun()
+            else:
+                st.session_state["last_scan_token_done"] = st.session_state["scan_token"]
 
         # (opcional) debug do texto lido
         with st.expander("Debug: texto do QR lido"):
@@ -657,6 +610,7 @@ with tab_desktop:
         st.markdown("### Pedido reproduzido")
 
         if st.session_state.get("import_ok") and st.session_state.get("import_pedido"):
+            st.success("✅ Pedido reproduzido com sucesso")
             pedido = st.session_state["import_pedido"]
 
             st.markdown("**Cliente (mínimo)**")
@@ -686,4 +640,5 @@ with tab_desktop:
             st.metric("Total", brl(float(itens["subtotal"].sum())))
         else:
             st.info("Aguardando leitura do QR para reproduzir o pedido.")
+
 
