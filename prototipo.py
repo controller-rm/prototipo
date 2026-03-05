@@ -544,27 +544,26 @@ with tab_desktop:
             """, unsafe_allow_html=True)
 
             if st.session_state.get("scanning", True):
+                from streamlit_webrtc import RTCConfiguration
+
+                RTC_CONFIGURATION = RTCConfiguration(
+                    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+                )
+
                 ctx = webrtc_streamer(
                     key=f"qr-reader-{st.session_state['camera_facing_mode']}-{st.session_state['scan_nonce']}",
                     video_processor_factory=QRVideoProcessor,
                     media_stream_constraints={
-                    "video": {
-                        "facingMode": {"ideal": st.session_state["camera_facing_mode"]},  # ideal em vez de string
-                        "width": {"ideal": 1920},
-                        "height": {"ideal": 1080},
-                        "aspectRatio": {"ideal": 16/9},
-                        "frameRate": {"ideal": 24, "max": 30},
-
-                        # Alguns browsers respeitam isso (principalmente mobile):
-                        "advanced": [
-                        {"focusMode": "continuous"},
-                        {"exposureMode": "continuous"},
-                        {"whiteBalanceMode": "continuous"},
-                        ],
+                        "video": {
+                            "facingMode": {"ideal": st.session_state["camera_facing_mode"]},
+                            "width": {"ideal": 1920},
+                            "height": {"ideal": 1080},
+                            "frameRate": {"ideal": 24, "max": 30},
+                        },
+                        "audio": False,
                     },
-                    "audio": False,
-                    },
-                                    )
+                    rtc_configuration=RTC_CONFIGURATION,  # ✅ aqui
+                )
 
                 if ctx.video_processor:
                     st.info(ctx.video_processor.last_status)
