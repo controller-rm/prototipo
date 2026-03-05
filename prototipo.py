@@ -615,8 +615,14 @@ with tab_desktop:
             ctx.video_processor.scan_token = st.session_state["scan_token"]
             st.info(ctx.video_processor.last_status)
 
+            # ✅ FAZ O APP "ENXERGAR" O last_text SEM PRECISAR CLICAR
+            if not st.session_state["import_ok"]:
+                st_autorefresh(
+                    interval=350,  # ms (ajuste 250~600)
+                    key=f"qr_poll_{st.session_state['scan_token']}",
+                )
+
             # ✅ IMPORTAÇÃO AUTOMÁTICA AO LER
-            # garante 1 import por ciclo (scan_token)
             if (
                 ctx.video_processor.last_text
                 and (st.session_state["last_scan_token_done"] != st.session_state["scan_token"])
@@ -624,7 +630,6 @@ with tab_desktop:
             ):
                 qr_text = ctx.video_processor.last_text
 
-                # beep no momento da leitura
                 if st.session_state["audio_enabled"] and not st.session_state["qr_beeped"]:
                     beep()
                     st.session_state["qr_beeped"] = True
@@ -681,3 +686,4 @@ with tab_desktop:
             st.metric("Total", brl(float(itens["subtotal"].sum())))
         else:
             st.info("Aguardando leitura do QR para reproduzir o pedido.")
+
