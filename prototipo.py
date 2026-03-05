@@ -1,24 +1,39 @@
+# =========================================================
+# ZIONNE — Protótipo Pedido via QR (Android -> Desktop)
+# Revisado para performance:
+# ✅ Carrinho O(1): índice por código (sem any()/next() a cada clique)
+# ✅ Renderização de catálogo otimizada: busca + paginação (evita 40+ cards com widgets sempre)
+# ✅ Leitura QR mais estável: pipeline leve + multi-scale + debounce + constraints agressivas
+# ✅ Código limpo: sem imports duplicados, sem classes duplicadas, sem variáveis soltas
+#
+# Requisitos (pip):
+# streamlit pandas qrcode pillow opencv-python-headless streamlit-webrtc streamlit-autorefresh zxing-cpp
+# (em alguns ambientes: zxingcpp)
+# =========================================================
+
+from __future__ import annotations
+
+import base64
 import io
 import json
 import uuid
+import zlib
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
-import zlib
-import base64
 
 # QR (geração)
 import qrcode
-from PIL import Image
 
 # Webcam QR (leitura)
 import cv2
-import av
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import numpy as np
+import zxingcpp
 from streamlit_autorefresh import st_autorefresh
-
+from streamlit_webrtc import RTCConfiguration, VideoProcessorBase, webrtc_streamer
 
 # =========================================================
 # PRODUTOS FIXOS (TAB_PRODUTO)
@@ -67,25 +82,43 @@ PRODUTOS_RAW = """
 """.strip()
 
 
+@st.cache_data(show_spinner=False)
 def parse_produtos(raw: str) -> pd.DataFrame:
-    rows = []
+    rows: List[dict] = []
     for line in raw.splitlines():
         parts = [p.strip() for p in line.split(";")]
         if len(parts) < 3:
             continue
-        codigo = str(parts[0]).strip()
+        codigo = str(parts[0]).strip().zfill(7)
         descricao = str(parts[1]).strip()
         preco_txt = str(parts[2]).strip().replace(".", "").replace(",", ".")
         try:
             preco = float(preco_txt)
         except ValueError:
             preco = 0.0
-        rows.append({"codigo": codigo.zfill(7), "descricao": descricao, "preco": preco})
-    return pd.DataFrame(rows)
+        rows.append({"codigo": codigo, "descricao": descricao, "preco": preco})
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["codigo"] = df["codigo"].astype(str).str.zfill(7)
+        df["preco"] = df["preco"].astype(float)
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def produtos_lookup(df: pd.DataFrame) -> Dict[str, Tuple[str, float]]:
+    """
+    Retorna dict: codigo -> (descricao, preco)
+    """
+    d: Dict[str, Tuple[str, float]] = {}
+    for r in df.itertuples(index=False):
+        # r: (codigo, descricao, preco)
+        d[str(r.codigo).zfill(7)] = (str(r.descricao), float(r.preco))
+    return d
 
 
 # =========================================================
-# CLIENTE
+# CLIENTE (mock)
 # =========================================================
 def mock_cliente_completo() -> dict:
     return {
@@ -115,91 +148,22 @@ def mock_cliente_completo() -> dict:
 
 
 # =========================================================
-# UTIL: QR
+# UTIL: formatação
 # =========================================================
 def brl(v: float) -> str:
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def make_qr_png(payload_text: str) -> bytes:
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=16,
-        border=6,
-    )
-    qr.add_data(payload_text)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def encode_qr_payload(payload: dict) -> str:
-    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    comp = zlib.compress(raw, level=9)
-    b64 = base64.urlsafe_b64encode(comp).decode("ascii")
-    return "QR1:" + b64
-
-
-def decode_qr_payload(text: str) -> dict:
-    text = text.strip()
-
-    if text.startswith("{"):
-        return json.loads(text)
-
-    if ":" in text:
-        prefix, b64 = text.split(":", 1)
-        if prefix in ("QR1", "ZIONNE_PEDIDO"):
-            comp = base64.urlsafe_b64decode(b64.encode("ascii"))
-            raw = zlib.decompress(comp)
-            return json.loads(raw.decode("utf-8"))
-
-    raise ValueError("Formato de QR não reconhecido")
-
-
 # =========================================================
-# TRECHO COMPLETO (ANDROID + QR + PROCESSOR) — pronto para colar
-# - Mantém seu carrinho como LISTA (list[dict]) para não quebrar o resto do app
-# - QR payload mínimo (cliente + itens c/q/p)
-# - Processor QR (ZXing) para usar no Desktop depois
+# QR: payload mínimo + encode/decode + geração PNG
 # =========================================================
-
-import io
-import json
-import uuid
-import base64
-import zlib
-from datetime import datetime
-from typing import Optional
-
-import pandas as pd
-import streamlit as st
-
-# QR (geração)
-import qrcode
-
-# Webcam / QR decode (processor)
-import cv2
-import zxingcpp
-from streamlit_webrtc import VideoProcessorBase
-
-
-# =========================================================
-# QR PAYLOAD (cliente mínimo + itens mínimos)
-# =========================================================
-def build_order_payload_min(cliente: dict, carrinho: list[dict], order_id: str) -> dict:
-    """
-    cliente: dict com pelo menos {cnpj, razao_social}
-    carrinho: list[dict] com {"codigo","qtd","preco"} (total é opcional)
-    """
+def build_order_payload_min(cliente: dict, carrinho_list: List[dict], order_id: str) -> dict:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    itens: list[dict] = []
+    itens: List[dict] = []
     total = 0.0
 
-    for item in carrinho:
+    for item in carrinho_list:
         codigo = str(item.get("codigo", "")).zfill(7)
         qtd = int(item.get("qtd", 0))
         preco = float(item.get("preco", 0.0))
@@ -253,8 +217,8 @@ def make_qr_png(payload_text: str) -> bytes:
     qr = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=16,
-        border=6,
+        box_size=12,  # menor = QR menos denso na tela (ajuda leitura) mantendo qualidade
+        border=5,
     )
     qr.add_data(payload_text)
     qr.make(fit=True)
@@ -264,107 +228,194 @@ def make_qr_png(payload_text: str) -> bytes:
     return buf.getvalue()
 
 
-def brl(v: float) -> str:
-    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+# =========================================================
+# CARRINHO: estrutura rápida (índice por código) + view em lista
+# =========================================================
+@dataclass
+class CartItem:
+    codigo: str
+    qtd: int
+    preco: float  # unitário
+
+    @property
+    def total(self) -> float:
+        return float(self.qtd) * float(self.preco)
+
+
+def cart_init():
+    st.session_state.setdefault("cart_index", {})  # codigo -> CartItem (ou dict)
+    st.session_state.setdefault("carrinho", [])  # view compatível (list[dict])
+
+
+def cart_sync_view():
+    """
+    Mantém st.session_state["carrinho"] como list[dict] para compatibilidade,
+    mas os updates acontecem em cart_index (O(1)).
+    """
+    idx: Dict[str, CartItem] = st.session_state["cart_index"]
+    st.session_state["carrinho"] = [
+        {"codigo": k, "qtd": v.qtd, "preco": float(v.preco), "total": float(v.total)}
+        for k, v in idx.items()
+    ]
+
+
+def cart_add(codigo: str, qtd: int, preco: float):
+    codigo = str(codigo).zfill(7)
+    qtd = int(qtd)
+    preco = float(preco)
+
+    if qtd <= 0:
+        return
+
+    idx: Dict[str, CartItem] = st.session_state["cart_index"]
+    if codigo in idx:
+        item = idx[codigo]
+        item.qtd += qtd
+        item.preco = preco  # atualiza preço (se mudar)
+    else:
+        idx[codigo] = CartItem(codigo=codigo, qtd=qtd, preco=preco)
+
+    cart_sync_view()
+
+
+def cart_clear():
+    st.session_state["cart_index"] = {}
+    st.session_state["carrinho"] = []
 
 
 # =========================================================
-# WEBCAM: leitor QR (processor)
+# WEBCAM: leitor QR com pipeline otimizado
 # =========================================================
 class QRVideoProcessor(VideoProcessorBase):
     """
-    Processor simples e estável:
-    - last_text: último QR detectado
-    - last_status: status de UI
+    Estável e rápido:
+    - tenta decodificar a cada N frames (reduz CPU)
+    - recorta centro (reduz ruído) sem exagerar
+    - multi-scale + 2 variantes (CLAHE/sharpen e threshold)
     """
 
     def __init__(self):
         self.last_text: Optional[str] = None
         self.last_status: str = "Aguardando QR..."
-        self.last_decode_time = 0.0
-        self.debounce_seconds = 1.2
+        self._last_decode_ts = 0.0
+        self._debounce_s = 0.9
         self._frame_i = 0
 
-    def _try_decode(self, img_bgr):
-        # performance: decodifica a cada 2 frames
-        self._frame_i += 1
-        if self._frame_i % 2 != 0:
-            return ""
+        self.scan_token = 0
+        self._seen_token = 0
 
+        # pré-cria CLAHE (evita overhead por frame)
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+    def reset_for_new_scan(self):
+        self.last_text = None
+        self.last_status = "Aguardando QR..."
+        self._last_decode_ts = 0.0
+
+    @staticmethod
+    def _crop_center(img_bgr: np.ndarray, pad: float = 0.07) -> np.ndarray:
         h, w = img_bgr.shape[:2]
-        pad = 0.12  # corta bordas -> ajuda (zoom), mas pode ajustar 0.06~0.12
         x0 = int(w * pad)
         x1 = int(w * (1 - pad))
         y0 = int(h * pad)
         y1 = int(h * (1 - pad))
-        img_bgr = img_bgr[y0:y1, x0:x1]
+        return img_bgr[y0:y1, x0:x1]
 
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=1.6, fy=1.6, interpolation=cv2.INTER_CUBIC)
+    def _prep_variants(self, gray: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        # V1: CLAHE + sharpen
+        g1 = self._clahe.apply(gray)
+        blur = cv2.GaussianBlur(g1, (0, 0), 1.0)
+        g1s = cv2.addWeighted(g1, 1.6, blur, -0.6, 0)
 
-        # contraste local (bom pra QR denso)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        gray = clahe.apply(gray)
+        # V2: threshold adaptativo (ajuda quando foco/contraste está ruim)
+        g2 = cv2.GaussianBlur(gray, (5, 5), 0)
+        th = cv2.adaptiveThreshold(
+            g2, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2
+        )
 
-        # sharpen leve
-        blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
-        gray = cv2.addWeighted(gray, 1.6, blur, -0.6, 0)
+        return g1s, th
 
-        results = zxingcpp.read_barcodes(gray)
-        return results[0].text if results else ""
+    def _try_decode(self, img_bgr: np.ndarray) -> str:
+        # decodifica a cada 2 frames (~15fps se cam ~30fps)
+        self._frame_i += 1
+        if self._frame_i % 2 != 0:
+            return ""
+
+        img_bgr = self._crop_center(img_bgr, pad=0.07)
+        gray0 = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+        # duas escalas (ajuda QR pequeno / distância)
+        for scale in (1.4, 2.0):
+            gray = cv2.resize(gray0, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            v1, v2 = self._prep_variants(gray)
+
+            # tenta 2 variantes
+            res = zxingcpp.read_barcodes(v1)
+            if res:
+                return res[0].text
+
+            res = zxingcpp.read_barcodes(v2)
+            if res:
+                return res[0].text
+
+        return ""
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         now_ts = datetime.now().timestamp()
 
+        # rearmar scan sem reconectar
+        if self.scan_token != self._seen_token:
+            self._seen_token = self.scan_token
+            self.reset_for_new_scan()
+
         data = self._try_decode(img)
 
-        if data and (now_ts - self.last_decode_time > self.debounce_seconds):
+        if data and (now_ts - self._last_decode_ts > self._debounce_s):
             self.last_text = data
-            self.last_status = f"✅ QR lido ({len(data)} chars)"
-            self.last_decode_time = now_ts
+            self.last_status = "✅ QR detectado"
+            self._last_decode_ts = now_ts
         else:
-            self.last_status = "✅ QR lido" if self.last_text else "Aguardando QR..."
+            self.last_status = "✅ QR detectado" if self.last_text else "Aguardando QR..."
 
         return frame
 
 
 # =========================================================
-# APP (abas + Android)
-# IMPORTANTE: mock_cliente_completo(), parse_produtos(), PRODUTOS_RAW devem existir no seu arquivo
+# APP
 # =========================================================
 st.set_page_config(page_title="Protótipo — Pedido via QR", layout="wide")
 st.title("🧾 Protótipo — Pedido via QR (Android → Desktop)")
-st.caption("Android monta pedido offline e gera QR. Desktop lê o QR e reconstrói o pedido usando tab_produto para descrição.")
+st.caption(
+    "Android monta pedido e gera QR. Desktop lê o QR e reconstrói itens com base na tab_produto."
+)
 
 # Estado base
-if "cliente" not in st.session_state:
-    st.session_state["cliente"] = mock_cliente_completo()
+st.session_state.setdefault("cliente", mock_cliente_completo())
+st.session_state.setdefault("tab_produto", parse_produtos(PRODUTOS_RAW))
+st.session_state.setdefault("last_qr_text", None)
+st.session_state.setdefault("last_qr_png", None)
+cart_init()
 
-if "tab_produto" not in st.session_state:
-    st.session_state["tab_produto"] = parse_produtos(PRODUTOS_RAW)
+produtos_df = st.session_state["tab_produto"]
+produtos_map = produtos_lookup(produtos_df)
 
-if "carrinho" not in st.session_state:
-    st.session_state["carrinho"] = []  # ✅ lista de dicts
-
-tab_android, tab_desktop, tab_produto = st.tabs(["📱 Android (simulação)", "💻 Desktop (simulação)", "📦 tab_produto"])
-
+tab_android, tab_desktop, tab_produto = st.tabs(
+    ["📱 Android (simulação)", "💻 Desktop (simulação)", "📦 tab_produto"]
+)
 
 # =========================================================
 # TAB_PRODUTO
 # =========================================================
 with tab_produto:
     st.subheader("📦 tab_produto — código / descrição / preço")
-    st.dataframe(st.session_state["tab_produto"], use_container_width=True, height=520)
-
+    st.dataframe(produtos_df, use_container_width=True, height=520)
 
 # =========================================================
 # ANDROID
 # =========================================================
 with tab_android:
-    st.subheader("📱 Android — catálogo em cards + carrinho")
-
-    produtos = st.session_state["tab_produto"].copy()
+    st.subheader("📱 Android — catálogo + carrinho (otimizado)")
 
     st.markdown(
         """
@@ -384,81 +435,110 @@ with tab_android:
         st.markdown("### Cliente (dados completos)")
         st.json(st.session_state["cliente"])
 
-        st.markdown("### Produtos (cards)")
+        st.markdown("### Produtos (busca + paginação)")
+
+        # 🔥 performance: filtra e mostra apenas um "slice" de produtos
+        f1, f2, f3 = st.columns([0.62, 0.20, 0.18])
+        with f1:
+            q = st.text_input(
+                "Buscar por código/descrição",
+                placeholder="Ex: 0000012 ou GEOMETRIA",
+                key="prod_search",
+            )
+        with f2:
+            page_size = st.selectbox("Por página", [8, 12, 16, 20], index=1, key="page_size")
+        with f3:
+            # contador de página (1-based)
+            st.session_state.setdefault("page", 1)
+
+        df_f = produtos_df
+        if q:
+            qq = q.strip().lower()
+            df_f = df_f[
+                df_f["codigo"].astype(str).str.lower().str.contains(qq)
+                | df_f["descricao"].astype(str).str.lower().str.contains(qq)
+            ]
+
+        total_rows = int(len(df_f))
+        total_pages = max(1, (total_rows + page_size - 1) // page_size)
+
+        # ajusta página se mudou filtro
+        if st.session_state["page"] > total_pages:
+            st.session_state["page"] = 1
+
+        pcol1, pcol2, pcol3 = st.columns([0.33, 0.34, 0.33])
+        with pcol1:
+            if st.button("⬅️", use_container_width=True, disabled=(st.session_state["page"] <= 1)):
+                st.session_state["page"] -= 1
+                st.rerun()
+        with pcol2:
+            st.caption(f"Página {st.session_state['page']} / {total_pages} • {total_rows} itens")
+        with pcol3:
+            if st.button("➡️", use_container_width=True, disabled=(st.session_state["page"] >= total_pages)):
+                st.session_state["page"] += 1
+                st.rerun()
+
+        start = (st.session_state["page"] - 1) * page_size
+        end = start + page_size
+        page_df = df_f.iloc[start:end].reset_index(drop=True)
+
         grid_cols = st.columns(2, gap="small")
 
-        rc = 0
-        for _, row in produtos.iterrows():
-            codigo = str(row["codigo"]).zfill(7)
-            preco = float(row["preco"])
-            col = grid_cols[rc % 2]
+        # 🔥 widget-count menor (poucos cards por vez) = app mais leve
+        for i, r in enumerate(page_df.itertuples(index=False)):
+            codigo = str(r.codigo).zfill(7)
+            descricao = str(r.descricao)
+            preco = float(r.preco)
 
+            col = grid_cols[i % 2]
             with col:
-                ja_no_carrinho = any(item["codigo"] == codigo for item in st.session_state.carrinho)
-
                 card = st.container(border=True)
                 with card:
                     st.markdown('<div class="card-inner">', unsafe_allow_html=True)
                     st.markdown(f'<div class="product-sku">SKU {codigo}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="product-desc">{row["descricao"]}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="product-desc">{descricao}</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="product-price">{brl(preco)}</div>', unsafe_allow_html=True)
 
+                    # qty por card (ok porque page_size é pequeno)
                     qtd = st.number_input(
                         "Qtd",
                         value=1,
                         min_value=1,
                         step=1,
-                        key=f"qtd_{codigo}_{rc}",
+                        key=f"qtd_{codigo}_{start+i}",
                     )
 
                     if st.button(
                         "Adicionar ➕",
-                        key=f"add_{codigo}_{rc}",
+                        key=f"add_{codigo}_{start+i}",
                         type="primary",
                         use_container_width=True,
                     ):
-                        if ja_no_carrinho:
-                            idx = next(
-                                i for i, item in enumerate(st.session_state.carrinho)
-                                if item["codigo"] == codigo
-                            )
-                            st.session_state.carrinho[idx]["qtd"] += int(qtd)
-                            st.session_state.carrinho[idx]["total"] = float(st.session_state.carrinho[idx]["qtd"] * preco)
-                            st.session_state.carrinho[idx]["preco"] = float(preco)
-                        else:
-                            st.session_state.carrinho.append(
-                                {
-                                    "codigo": codigo,
-                                    "qtd": int(qtd),
-                                    "preco": float(preco),
-                                    "total": float(int(qtd) * preco),
-                                }
-                            )
+                        cart_add(codigo=codigo, qtd=int(qtd), preco=float(preco))
+                        st.toast(f"Adicionado {codigo} x{int(qtd)}", icon="✅")
                         st.rerun()
 
                     st.markdown("</div>", unsafe_allow_html=True)
 
-            rc += 1
-
     with col_right:
         st.markdown("### 🛒 Carrinho")
 
-        if st.session_state.carrinho:
-            df_cart = pd.DataFrame(st.session_state.carrinho).copy()
+        cart_list = st.session_state["carrinho"]
+
+        if cart_list:
+            df_cart = pd.DataFrame(cart_list).copy()
             df_cart["codigo"] = df_cart["codigo"].astype(str).str.zfill(7)
 
-            df_cart = df_cart.merge(
-                produtos[["codigo", "descricao"]],
-                on="codigo",
-                how="left",
-            )
+            # join rápido por map (evita merge pesado em loop grande)
+            df_cart["descricao"] = df_cart["codigo"].map(lambda c: produtos_map.get(c, ("", 0.0))[0])
+            df_cart["descricao"] = df_cart["descricao"].fillna("")
 
-            # garante colunas/ordem
             df_cart = df_cart[["codigo", "descricao", "qtd", "preco", "total"]]
+            df_cart["qtd"] = df_cart["qtd"].astype(int)
             df_cart["preco"] = df_cart["preco"].astype(float)
             df_cart["total"] = df_cart["total"].astype(float)
 
-            st.dataframe(df_cart, use_container_width=True, height=350)
+            st.dataframe(df_cart, use_container_width=True, height=330)
 
             total = float(df_cart["total"].sum())
             st.metric("Total do Pedido", brl(total))
@@ -466,7 +546,7 @@ with tab_android:
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("🧹 Limpar carrinho", use_container_width=True):
-                    st.session_state.carrinho = []
+                    cart_clear()
                     st.rerun()
 
             with c2:
@@ -474,7 +554,7 @@ with tab_android:
                     order_id = uuid.uuid4().hex[:10].upper()
                     payload = build_order_payload_min(
                         cliente=st.session_state["cliente"],
-                        carrinho=st.session_state.carrinho,
+                        carrinho_list=cart_list,
                         order_id=order_id,
                     )
                     qr_text = encode_qr_payload(payload)
@@ -483,136 +563,27 @@ with tab_android:
                     st.rerun()
 
         else:
-            st.info("Carrinho vazio. Adicione produtos nos cards ao lado.")
+            st.info("Carrinho vazio. Adicione produtos no catálogo.")
 
-        if "last_qr_png" in st.session_state:
+        if st.session_state.get("last_qr_png"):
             st.divider()
             st.success("QR gerado! Leia no Desktop para reconstruir o pedido.")
             st.image(st.session_state["last_qr_png"], width=520)
             with st.expander("Ver conteúdo do QR (compactado)"):
-                st.code(st.session_state["last_qr_text"])
+                st.code(st.session_state["last_qr_text"] or "")
 
 # =========================================================
-# DESKTOP (LEITOR ROBUSTO: +QUALIDADE +AUTOFOCO/EXPOSIÇÃO +PIPELINE MELHOR)
+# DESKTOP
 # =========================================================
 with tab_desktop:
-    st.subheader("💻 Desktop — ler QR e reproduzir pedido (descrição via tab_produto)")
+    st.subheader("💻 Desktop — ler QR e reproduzir pedido")
 
-    # -------------------------
-    # Estados
-    # -------------------------
+    # estados do scanner/import
     st.session_state.setdefault("scan_token", 0)
     st.session_state.setdefault("import_ok", False)
     st.session_state.setdefault("import_pedido", None)
     st.session_state.setdefault("imported_token", -1)
-    st.session_state.setdefault("cleared_token", -1)
 
-    produtos = st.session_state["tab_produto"].copy()
-
-    # -------------------------
-    # Processor (robusto)
-    # -------------------------
-    import zxingcpp
-    import cv2
-    import numpy as np
-    from streamlit_webrtc import RTCConfiguration, VideoProcessorBase
-
-    class QRVideoProcessor(VideoProcessorBase):
-        def __init__(self):
-            self.last_text: Optional[str] = None
-            self.last_status: str = "Aguardando QR..."
-            self.last_decode_time = 0.0
-            self.debounce_seconds = 0.9
-
-            self.scan_token = 0
-            self._seen_token = 0
-            self._frame_i = 0
-
-        def reset_for_new_scan(self):
-            self.last_text = None
-            self.last_status = "Aguardando QR..."
-            self.last_decode_time = 0.0
-
-        def _crop_center(self, img_bgr, pad=0.06):
-            # Menos corte que antes -> não “perde” QR grande e também ajuda foco
-            h, w = img_bgr.shape[:2]
-            x0 = int(w * pad); x1 = int(w * (1 - pad))
-            y0 = int(h * pad); y1 = int(h * (1 - pad))
-            return img_bgr[y0:y1, x0:x1]
-
-        def _prep_variants(self, gray: np.ndarray):
-            """
-            Gera variantes para lidar com foco oscilando:
-            - CLAHE + sharpen
-            - Adaptive threshold (bom para contraste ruim / desfoque leve)
-            """
-            out = []
-
-            # 1) CLAHE
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            g1 = clahe.apply(gray)
-
-            # sharpen leve
-            blur = cv2.GaussianBlur(g1, (0, 0), 1.0)
-            g1s = cv2.addWeighted(g1, 1.6, blur, -0.6, 0)
-            out.append(g1s)
-
-            # 2) threshold adaptativo (ajuda MUITO quando “não foca”)
-            g2 = cv2.GaussianBlur(gray, (5, 5), 0)
-            th = cv2.adaptiveThreshold(
-                g2, 255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY,
-                31, 2
-            )
-            out.append(th)
-
-            return out
-
-        def _try_decode(self, img_bgr):
-            # Performance: tenta decodificar ~15 fps (1 a cada 2 frames em 30 fps)
-            self._frame_i += 1
-            if self._frame_i % 2 != 0:
-                return ""
-
-            img_bgr = self._crop_center(img_bgr, pad=0.06)
-            gray0 = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
-            # 🔥 Multi-scale: tenta 2 escalas (ajuda QR pequeno / distância)
-            for scale in (1.4, 2.0):
-                gray = cv2.resize(gray0, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-
-                # tenta com 2 variantes (CLAHE/sharpen e threshold)
-                for variant in self._prep_variants(gray):
-                    results = zxingcpp.read_barcodes(variant)
-                    if results:
-                        return results[0].text
-
-            return ""
-
-        def recv(self, frame):
-            img = frame.to_ndarray(format="bgr24")
-            now_ts = datetime.now().timestamp()
-
-            # Rearma sem reconectar
-            if self.scan_token != self._seen_token:
-                self._seen_token = self.scan_token
-                self.reset_for_new_scan()
-
-            data = self._try_decode(img)
-
-            if data and (now_ts - self.last_decode_time > self.debounce_seconds):
-                self.last_text = data
-                self.last_status = "✅ QR detectado"
-                self.last_decode_time = now_ts
-            else:
-                self.last_status = "✅ QR detectado" if self.last_text else "Aguardando QR..."
-
-            return frame
-
-    # -------------------------
-    # Função: Novo QR
-    # -------------------------
     def arm_new_scan():
         st.session_state["scan_token"] += 1
         st.session_state["import_ok"] = False
@@ -620,9 +591,6 @@ with tab_desktop:
         st.session_state["imported_token"] = -1
         st.rerun()
 
-    # -------------------------
-    # UI
-    # -------------------------
     colA, colB = st.columns([1, 1], gap="large")
 
     with colA:
@@ -633,20 +601,23 @@ with tab_desktop:
             if st.button("🆕 Novo QR", use_container_width=True, type="primary"):
                 arm_new_scan()
         with c2:
-            st.caption("Câmera sempre aberta • Captura automática • Pipeline reforçado")
+            st.caption("Câmera aberta • Captura automática • Debounce • Multi-scale")
 
-        st.markdown("""
-        <style>
-        video {
-            width: 100% !important;
-            max-width: 840px !important;
-            height: 480px !important;
-            object-fit: cover !important;
-            border-radius: 12px;
-            background: #000;
-        }
-        </style>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            """
+            <style>
+            video {
+                width: 100% !important;
+                max-width: 840px !important;
+                height: 480px !important;
+                object-fit: cover !important;
+                border-radius: 12px;
+                background: #000;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
         camera_mode_label = st.selectbox(
             "Escolha a câmera",
@@ -660,24 +631,18 @@ with tab_desktop:
             {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
         )
 
-        # ✅ Constraints “mais agressivas” de qualidade
-        # Observação: o navegador pode ignorar parte disso, mas geralmente melhora.
+        # constraints agressivas (browser pode ignorar parte)
         media_constraints = {
             "video": {
                 "facingMode": facing_mode,
-                # tente alta resolução (o browser escolhe a melhor disponível)
-                "width": {"ideal": 3840, "min": 1280},
-                "height": {"ideal": 2160, "min": 720},
-                # fps menor ajuda nitidez (menos motion blur)
+                "width": {"ideal": 1920, "min": 1280},
+                "height": {"ideal": 1080, "min": 720},
+                # fps menor geralmente melhora nitidez e reduz blur
                 "frameRate": {"ideal": 20, "max": 24},
-                # tenta recursos de câmera (nem sempre disponíveis)
                 "advanced": [
                     {"focusMode": "continuous"},
                     {"exposureMode": "continuous"},
                     {"whiteBalanceMode": "continuous"},
-                    # alguns devices aceitam:
-                    {"sharpness": 1.0},
-                    {"contrast": 1.0},
                 ],
             },
             "audio": False,
@@ -691,7 +656,7 @@ with tab_desktop:
             async_processing=True,
         )
 
-        # ✅ Mantém vivo para capturar sem clique
+        # mantém UI atualizando enquanto não importou
         if not st.session_state["import_ok"]:
             st_autorefresh(interval=220, key=f"poll_scan_{st.session_state['scan_token']}")
 
@@ -699,15 +664,10 @@ with tab_desktop:
             ctx.video_processor.scan_token = st.session_state["scan_token"]
             st.info(ctx.video_processor.last_status)
 
-            # Limpeza real do processor por token
-            if st.session_state["cleared_token"] != st.session_state["scan_token"]:
-                ctx.video_processor.reset_for_new_scan()
-                st.session_state["cleared_token"] = st.session_state["scan_token"]
-
-            # Importação automática
+            # importação automática
             if (
                 ctx.video_processor.last_text
-                and (st.session_state["imported_token"] != st.session_state["scan_token"])
+                and st.session_state["imported_token"] != st.session_state["scan_token"]
             ):
                 qr_text = ctx.video_processor.last_text
 
@@ -726,35 +686,36 @@ with tab_desktop:
     with colB:
         st.markdown("### Pedido reproduzido")
 
-        if st.session_state.get("import_ok") and st.session_state.get("import_pedido"):
+        pedido = st.session_state.get("import_pedido")
+        if st.session_state.get("import_ok") and pedido:
             st.success("✅ Pedido reproduzido com sucesso")
-            pedido = st.session_state["import_pedido"]
 
             st.markdown("**Cliente (mínimo)**")
-            st.json(pedido["cliente"])
+            st.json(pedido.get("cliente", {}))
 
-            itens_min = pd.DataFrame(pedido["itens"]).rename(
+            itens_min = pd.DataFrame(pedido.get("itens", [])).rename(
                 columns={"c": "codigo", "q": "qtde", "p": "preco_unit"}
             )
-            itens_min["codigo"] = itens_min["codigo"].astype(str).str.zfill(7)
-            itens_min["qtde"] = itens_min["qtde"].astype(int)
-            itens_min["preco_unit"] = itens_min["preco_unit"].astype(float)
 
-            itens = itens_min.merge(
-                produtos[["codigo", "descricao"]],
-                on="codigo",
-                how="left",
-            )
-            itens["descricao"] = itens["descricao"].fillna("**PRODUTO NÃO ENCONTRADO NA TAB_PRODUTO**")
-            itens["subtotal"] = itens["qtde"] * itens["preco_unit"]
+            if itens_min.empty:
+                st.warning("Pedido sem itens.")
+            else:
+                itens_min["codigo"] = itens_min["codigo"].astype(str).str.zfill(7)
+                itens_min["qtde"] = itens_min["qtde"].astype(int)
+                itens_min["preco_unit"] = itens_min["preco_unit"].astype(float)
 
-            st.markdown("**Itens**")
-            st.dataframe(
-                itens[["codigo", "descricao", "qtde", "preco_unit", "subtotal"]],
-                use_container_width=True,
-                height=320,
-            )
-            st.metric("Total", brl(float(itens["subtotal"].sum())))
+                # lookup mais rápido que merge (e evita NaN surpresa)
+                itens_min["descricao"] = itens_min["codigo"].map(
+                    lambda c: produtos_map.get(c, ("**PRODUTO NÃO ENCONTRADO NA TAB_PRODUTO**", 0.0))[0]
+                )
+                itens_min["subtotal"] = itens_min["qtde"] * itens_min["preco_unit"]
+
+                st.markdown("**Itens**")
+                st.dataframe(
+                    itens_min[["codigo", "descricao", "qtde", "preco_unit", "subtotal"]],
+                    use_container_width=True,
+                    height=320,
+                )
+                st.metric("Total", brl(float(itens_min["subtotal"].sum())))
         else:
             st.info("Aguardando leitura do QR para reproduzir o pedido.")
-
