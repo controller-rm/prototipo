@@ -444,6 +444,12 @@ with tab_desktop:
     # -------------------------
     if "audio_enabled" not in st.session_state:
         st.session_state["audio_enabled"] = False
+    if "show_alert" not in st.session_state:
+        st.session_state["show_alert"] = False
+    if "alert_title" not in st.session_state:
+        st.session_state["alert_title"] = "ALERTA DE SISTEMA"
+    if "alert_msg" not in st.session_state:
+        st.session_state["alert_msg"] = ""    
     if "scan_token" not in st.session_state:
         st.session_state["scan_token"] = 0
     if "qr_text_from_cam" not in st.session_state:
@@ -478,6 +484,13 @@ with tab_desktop:
             st.session_state["import_pedido"] = None
             st.error("QR inválido: payload não é ORDER_MIN.")
 
+        if isinstance(meta, dict) and meta.get("type") == "ORDER_MIN":
+            st.session_state["import_ok"] = True
+            st.session_state["import_pedido"] = meta
+
+            # ✅ ATIVA ALERTA (acima da câmera)
+            st.session_state["show_alert"] = True
+            st.session_state["alert_msg"] = f"O pedido #{meta.get('order_id', '')} foi reproduzido com sucesso."
     # -------------------------
     # UI
     # -------------------------
@@ -527,6 +540,95 @@ with tab_desktop:
             key="camera_select",
         )
         facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
+        alert_slot = st.empty()
+
+        if st.session_state.get("show_alert"):
+            alert_slot.markdown(
+                f"""
+                <style>
+                .zionne-alert-wrap {{
+                    position: sticky;
+                    top: 0;
+                    z-index: 9999;
+                    margin-bottom: 12px;
+                }}
+                .zionne-alert {{
+                    border-radius: 14px;
+                    overflow: hidden;
+                    border: 1px solid #e5e7eb;
+                    box-shadow: 0 18px 40px rgba(0,0,0,.18);
+                    background: white;
+                }}
+                .zionne-alert-header {{
+                    background: #d43d3d;
+                    color: #fff;
+                    padding: 12px 16px;
+                    font-weight: 900;
+                    letter-spacing: .5px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                }}
+                .zionne-alert-body {{
+                    padding: 18px 16px 14px 16px;
+                }}
+                .zionne-alert-title {{
+                    font-size: 28px;
+                    font-weight: 900;
+                    margin: 0 0 8px 0;
+                    text-align: center;
+                }}
+                .zionne-alert-sub {{
+                    font-size: 14px;
+                    color: #111827;
+                    display: flex;
+                    gap: 8px;
+                    align-items: center;
+                    justify-content: center;
+                    margin-top: 6px;
+                }}
+                .zionne-alert-pill {{
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 999px;
+                    background: #22c55e;
+                    display: inline-block;
+                }}
+                .zionne-alert-hint {{
+                    text-align: center;
+                    color: #6b7280;
+                    font-size: 12px;
+                    margin-top: 10px;
+                }}
+                </style>
+
+                <div class="zionne-alert-wrap">
+                <div class="zionne-alert">
+                    <div class="zionne-alert-header">
+                    <div>{st.session_state.get("alert_title","ALERTA DE SISTEMA")}</div>
+                    <div style="opacity:.9;font-weight:900;">✕</div>
+                    </div>
+                    <div class="zionne-alert-body">
+                    <div class="zionne-alert-title">PEDIDO REPRODUZIDO</div>
+                    <div class="zionne-alert-sub">
+                        <span class="zionne-alert-pill"></span>
+                        <span>{st.session_state.get("alert_msg","")}</span>
+                    </div>
+                    <div class="zionne-alert-hint">Toque em <b>OK, ENTENDI</b> para continuar.</div>
+                    </div>
+                </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Botão Streamlit (fica abaixo do HTML, mas ainda acima da câmera)
+            if st.button("OK, ENTENDI", type="primary", use_container_width=True, key="btn_ok_alert"):
+                st.session_state["show_alert"] = False
+                alert_slot.empty()
+                st.rerun()
+        else:
+            alert_slot.empty()
 
         RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
