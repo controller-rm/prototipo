@@ -459,6 +459,9 @@ with tab_android:
 # =========================================================
 with tab_desktop:
     st.subheader("💻 Desktop — ler QR e reproduzir pedido (descrição via tab_produto)")
+    # ✅ estados base (adicione este também)
+    if "webrtc_key_nonce" not in st.session_state:
+        st.session_state["webrtc_key_nonce"] = 0
     if "webrtc_playing" not in st.session_state:
         st.session_state["webrtc_playing"] = True
     # estados base
@@ -536,7 +539,7 @@ with tab_desktop:
             facing_mode = "environment" if camera_mode_label.startswith("Traseira") else "user"
             if "camera_facing_mode" not in st.session_state:
                 st.session_state["camera_facing_mode"] = facing_mode
-                
+
             if st.session_state.get("camera_facing_mode") != facing_mode:
                 st.session_state["camera_facing_mode"] = facing_mode
                 st.session_state["webrtc_key_nonce"] += 1  # ✅ força reset
